@@ -96,11 +96,6 @@ already queued replaces the older pending run rather
 than queueing behind it. Check the Actions run queue before dispatching. To retry a
 failed run, dispatch a new one from `main`; re-runs are refused.
 
-## Temporary rehearsal
-
-`.github/workflows/rehearsal.yml` is a temporary, credential-free rehearsal of the promotion
-tool path under environment `controller-rehearsal`; removed after its run.
-
 ## Adding a release
 
 A release is added to the allowlist by opening a pull request that adds exactly one
