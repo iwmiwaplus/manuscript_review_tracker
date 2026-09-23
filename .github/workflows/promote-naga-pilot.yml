@@ -1,0 +1,186 @@
+name: Promote Naga pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to promote (e.g. v1.2.0-rc.1)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: promote-naga-pilot
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: naga-pilot
+    permissions:
+      contents: read
+    steps:
+      - name: Validate request
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: |
+          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ]; then
+            printf 'actor-not-promoter\n'
+            exit 1
+          fi
+
+      - name: Checkout controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch source
+        shell: bash
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          SOURCE_REPOSITORY="$(jq -r .source_repository releases/naga-pilot.json)" \
+            bash scripts/fetch-source.sh "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Verify release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/verify-release.sh releases/naga-pilot.json "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Check deployment configuration
+        shell: bash
+        env:
+          PILOT_SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+          PILOT_SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
+          PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+          PILOT_VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
+          PILOT_VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
+        run: |
+          if [ -z "$PILOT_SUPABASE_ACCESS_TOKEN" ] || [ -z "$PILOT_SUPABASE_DB_PASSWORD" ] || \
+             [ -z "$PILOT_SUPABASE_PROJECT_REF" ] || [ -z "$PILOT_VERCEL_TOKEN" ] || \
+             [ -z "$PILOT_VERCEL_ORG_ID" ] || [ -z "$PILOT_VERCEL_PROJECT_ID" ]; then
+            printf 'verify: FAIL deployment-config-missing\n'
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Install
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci
+
+      - name: Link database
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+          PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
+          PILOT_SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-link \
+            npx supabase link --project-ref "$PILOT_SUPABASE_PROJECT_REF" --password "$PILOT_SUPABASE_DB_PASSWORD"
+
+      - name: Preview migrations
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-preview \
+            npx supabase db push --linked --include-all --dry-run
+
+      - name: Apply migrations
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-push \
+            npx supabase db push --linked --include-all --yes
+
+      - name: Deploy notification worker
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+          PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" edge-deploy \
+            npx supabase functions deploy deliver-notifications --project-ref "$PILOT_SUPABASE_PROJECT_REF" --use-api
+
+      - name: Pull Vercel configuration
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-pull \
+            npx --yes vercel@59.5.0 pull --yes --environment=production --token="$PILOT_VERCEL_TOKEN"
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
+            npx --yes vercel@59.5.0 build --prod --token="$PILOT_VERCEL_TOKEN"
+
+      - name: Deploy
+        id: deploy
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-deploy \
+            npx --yes vercel@59.5.0 deploy --prebuilt --prod --token="$PILOT_VERCEL_TOKEN"
+          LOG_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.log"
+          URL=$(tail -n 1 "$LOG_FILE")
+          if ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
+            printf 'stage vercel-deploy-url: FAIL (exit 1)\n'
+            exit 1
+          fi
+          printf 'url=%s\n' "$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Verify public routes
+        shell: bash
+        env:
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          for path in /login /register; do
+            CODE=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$DEPLOY_URL$path")
+            if [ "$CODE" != "200" ]; then
+              printf 'routes: FAIL %s %s\n' "$path" "$CODE"
+              exit 1
+            fi
+          done
+          printf 'routes: ok\n'
+
+      - name: Record promotion
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
+          TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
+          {
+            printf 'tag: %s\n' "$RELEASE_TAG"
+            printf 'commit: %s\n' "$COMMIT"
+            printf 'tree: %s\n' "$TREE"
+            printf 'url: %s\n' "$DEPLOY_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

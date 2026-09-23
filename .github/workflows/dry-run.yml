@@ -1,0 +1,99 @@
+name: Controller dry run
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to dry-run (e.g. v1.2.0-rc.1)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: promote-naga-pilot
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: controller-dry-run
+    permissions:
+      contents: read
+    steps:
+      - name: Validate request
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: |
+          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ]; then
+            printf 'actor-not-promoter\n'
+            exit 1
+          fi
+
+      - name: Checkout controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch source
+        shell: bash
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          SOURCE_REPOSITORY="$(jq -r .source_repository releases/naga-pilot.json)" \
+            bash scripts/fetch-source.sh "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Verify release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/verify-release.sh releases/naga-pilot.json "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Install
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://example.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: dry-run
+          NEXT_PUBLIC_SITE_URL: https://example.invalid
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" build npx next build
+
+      - name: Canary
+        shell: bash
+        env:
+          DRY_RUN_CANARY: ${{ secrets.DRY_RUN_CANARY }}
+        run: |
+          if [ -n "$DRY_RUN_CANARY" ]; then
+            printf 'canary: present\n'
+          else
+            printf 'canary: absent\n'
+          fi
+
+      - name: Record dry run
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
+          TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
+          {
+            printf 'tag: %s\n' "$RELEASE_TAG"
+            printf 'commit: %s\n' "$COMMIT"
+            printf 'tree: %s\n' "$TREE"
+            printf 'dry run: build ok\n'
+          } >> "$GITHUB_STEP_SUMMARY"
