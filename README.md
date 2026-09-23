@@ -51,22 +51,17 @@ A promotion run:
 8. Verifies that the deployed site's public routes respond and records tag, commit and
    tree to the job summary.
 
-Secrets live only in the protected environments (`naga-pilot`, or `controller-dry-run`
-for the dry run), never at repository level, and each is passed only to the step that
+Secrets live only in the protected `naga-pilot` environment, never at repository
+level, and each is passed only to the step that
 needs it, by environment variable, never on a command line. Besides
 `SOURCE_DEPLOY_KEY`, `naga-pilot` holds six deployment secrets:
 `PILOT_SUPABASE_ACCESS_TOKEN`, `PILOT_SUPABASE_DB_PASSWORD`, `PILOT_SUPABASE_PROJECT_REF`,
 `PILOT_VERCEL_TOKEN`, `PILOT_VERCEL_ORG_ID`, `PILOT_VERCEL_PROJECT_ID` (the Vercel IDs
 are secrets so they are masked in the public log). The `promote` job requires a review before it runs.
 
-`.github/workflows/dry-run.yml` is a temporary companion that rehearses the same trust
-path (preflight, check-run, fetch, verify, pinned Supabase CLI, tools lockfile,
-`npm ci --ignore-scripts`, build) without any deployment credential; it is removed
-once that rehearsal is complete.
-
-Both workflows share the concurrency group `promote-naga-pilot`. GitHub keeps at
-most one pending run per concurrency group, so dispatching either workflow while
-another run in that group is already queued replaces the older pending run rather
+Promotion runs use the concurrency group `promote-naga-pilot`. GitHub keeps at
+most one pending run per concurrency group, so dispatching while another run is
+already queued replaces the older pending run rather
 than queueing behind it. Check the Actions run queue before dispatching. To retry a
 failed run, dispatch a new one from `main`; re-runs are refused.
 
