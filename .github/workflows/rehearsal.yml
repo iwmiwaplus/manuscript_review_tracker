@@ -1,0 +1,251 @@
+name: Controller rehearsal
+run-name: 'Controller rehearsal ${{ inputs.release_tag }} by @${{ github.actor }}'
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to promote (e.g. v1.2.0-rc.1)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: promote-naga-pilot
+  cancel-in-progress: false
+
+# Temporary, credential-free rehearsal of the promotion tool path; removed after
+# its run. The only secret is the read-only source deploy key. No database step,
+# no Vercel token, no deploy.
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check run
+        shell: bash
+        env:
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: bash scripts/check-run.sh
+
+      - name: Check allowlist
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/verify-release.sh releases/naga-pilot.json "$RELEASE_TAG"
+
+      - name: Show release for approval
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
+          TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
+          {
+            printf 'tag: %s\n' "$RELEASE_TAG"
+            printf 'commit: %s\n' "$COMMIT"
+            printf 'tree: %s\n' "$TREE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rehearse:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: controller-rehearsal
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Repeated here: "Re-run failed jobs" reuses preflight's earlier result.
+      - name: Check run
+        shell: bash
+        env:
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: bash scripts/check-run.sh
+
+      - name: Fetch source
+        shell: bash
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          SOURCE_REPOSITORY="$(jq -r .source_repository releases/naga-pilot.json)" \
+            bash scripts/fetch-source.sh releases/naga-pilot.json "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Verify release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/verify-release.sh releases/naga-pilot.json "$RELEASE_TAG" "$RUNNER_TEMP/src"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install tools
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/npmrc-empty"
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" tools \
+            npm ci --ignore-scripts --no-audit --no-fund --userconfig "$RUNNER_TEMP/npmrc-empty" \
+            --prefix "$GITHUB_WORKSPACE/tools"
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-version \
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" --version
+          rm -rf "$RUNNER_TEMP/deploy-tools" "$RUNNER_TEMP/npm-cache-deploy"
+          mkdir "$RUNNER_TEMP/deploy-tools"
+          : > "$RUNNER_TEMP/npmrc-empty-deploy"
+          cp "$GITHUB_WORKSPACE/tools/package.json" "$GITHUB_WORKSPACE/tools/package-lock.json" "$RUNNER_TEMP/deploy-tools/"
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" deploy-tools \
+            npm ci --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/npm-cache-deploy" \
+            --userconfig "$RUNNER_TEMP/npmrc-empty-deploy" --prefix "$RUNNER_TEMP/deploy-tools"
+
+      # Recorded before any application code runs; a step output is held by the
+      # runner, out of reach of the build. Re-checked in "Verify tools".
+      - name: Record tool digest
+        id: tooldigest
+        shell: bash
+        run: |
+          SCRIPT=$(sha256sum < "$GITHUB_WORKSPACE/scripts/tool-digest.sh") || SCRIPT=
+          SCRIPT=${SCRIPT%% *}
+          NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR" "$RUNNER_TEMP/deploy-tools") || {
+            printf 'verify: FAIL tool-integrity\n'
+            exit 1
+          }
+          if ! [[ "$SCRIPT" =~ ^[0-9a-f]{64}$ ]]; then
+            printf 'verify: FAIL tool-integrity\n'
+            exit 1
+          fi
+          {
+            printf 'digest=%s\n' "$DIGEST"
+            printf 'script=%s\n' "$SCRIPT"
+          } >> "$GITHUB_OUTPUT"
+          printf 'tools: recorded\n'
+
+      # No application code runs until every Supabase step is done: the CLI is
+      # a sha256-pinned release binary, and the app is not installed yet.
+      # The tarball's `supabase` is a shim that execs the `supabase-go` beside it.
+      - name: Install Supabase CLI
+        shell: bash
+        env:
+          SUPABASE_CLI_URL: https://github.com/supabase/cli/releases/download/v2.113.0/supabase_2.113.0_linux_amd64.tar.gz
+          SUPABASE_CLI_SHA256: 14659e7148ad17b77e69e5c36b27be572110519c76c796da1b53c07c3590f593
+        run: |
+          # shellcheck disable=SC2016 # expanded by the inner bash from the step env
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" supabase-cli bash -euc '
+            curl --fail --silent --show-error --location --proto "=https" --retry 3 \
+              --output "$RUNNER_TEMP/supabase-cli.tar.gz" "$SUPABASE_CLI_URL"
+            printf "%s  %s\n" "$SUPABASE_CLI_SHA256" "$RUNNER_TEMP/supabase-cli.tar.gz" | sha256sum --check --strict
+            mkdir -p "$RUNNER_TEMP/bin"
+            tar -xzf "$RUNNER_TEMP/supabase-cli.tar.gz" -C "$RUNNER_TEMP/bin" supabase supabase-go
+            test -x "$RUNNER_TEMP/bin/supabase"
+          '
+
+      - name: Check Supabase CLI
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" supabase-version "$RUNNER_TEMP/bin/supabase" --version
+
+      - name: Remove database link
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/src/supabase/.temp"
+
+      - name: Install
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci --ignore-scripts
+
+      # Replaces "Pull Vercel configuration": no token; placeholder ids and
+      # public-shaped placeholder values only.
+      - name: Synthesize Vercel configuration
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/src/.vercel"
+          printf '%s\n' '{"projectId":"prj_rehearsal","orgId":"team_rehearsal","settings":{"framework":"nextjs","devCommand":null,"installCommand":null,"buildCommand":null,"outputDirectory":null,"rootDirectory":null,"directoryListing":false,"nodeVersion":"24.x"}}' \
+            > "$RUNNER_TEMP/src/.vercel/project.json"
+          {
+            printf '%s\n' 'NEXT_PUBLIC_SUPABASE_URL=https://example.invalid'
+            printf '%s\n' 'NEXT_PUBLIC_SUPABASE_ANON_KEY=rehearsal'
+            printf '%s\n' 'NEXT_PUBLIC_SITE_URL=https://example.invalid'
+            printf '%s\n' 'NEXT_TELEMETRY_DISABLED=1'
+          } > "$RUNNER_TEMP/src/.vercel/.env.production.local"
+          printf 'vercel-config: synthesized\n'
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: |
+          STATUS=0
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" build --prod || STATUS=$?
+          # Nothing the build wrote to the step files reaches later steps.
+          : > "$GITHUB_ENV"
+          : > "$GITHUB_PATH"
+          : > "$GITHUB_OUTPUT"
+          : > "$GITHUB_STEP_SUMMARY"
+          exit "$STATUS"
+
+      # The build ran application code as this user: re-check the tools (local
+      # only, no network) before Deploy uses the pre-installed deploy-tools copy.
+      - name: Verify tools
+        shell: bash
+        env:
+          RECORDED_DIGEST: ${{ steps.tooldigest.outputs.digest }}
+          RECORDED_SCRIPT: ${{ steps.tooldigest.outputs.script }}
+        run: |
+          fail() {
+            printf 'verify: FAIL tool-integrity\n'
+            exit 1
+          }
+          for v in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH NODE_OPTIONS; do
+            [ -z "${!v:-}" ] || fail
+          done
+          # Check the digest script itself (system sha256sum) before running it.
+          SCRIPT=$(sha256sum < "$GITHUB_WORKSPACE/scripts/tool-digest.sh") || fail
+          SCRIPT=${SCRIPT%% *}
+          if [ -z "$RECORDED_SCRIPT" ] || [ "$SCRIPT" != "$RECORDED_SCRIPT" ]; then
+            fail
+          fi
+          NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR" "$RUNNER_TEMP/deploy-tools") || fail
+          if [ -z "$RECORDED_DIGEST" ] || [ -z "$DIGEST" ] || [ "$DIGEST" != "$RECORDED_DIGEST" ]; then
+            fail
+          fi
+          rm -rf "$RUNNER_TEMP/vercel-global"
+          mkdir "$RUNNER_TEMP/vercel-global"
+          printf 'tools: verified\n'
+
+      # Replaces Deploy: runs the pre-installed deploy-tools copy with the fresh
+      # global config, without a token and without deploying.
+      - name: Check deploy tool
+        shell: bash
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" deploy-tool-version \
+            "$RUNNER_TEMP/deploy-tools/node_modules/.bin/vercel" --version --global-config "$RUNNER_TEMP/vercel-global"
+
+      - name: Record rehearsal
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
+          TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
+          {
+            printf 'tag: %s\n' "$RELEASE_TAG"
+            printf 'commit: %s\n' "$COMMIT"
+            printf 'tree: %s\n' "$TREE"
+            printf 'rehearsal: tools verified, build ok, no deployment\n'
+          } >> "$GITHUB_STEP_SUMMARY"
