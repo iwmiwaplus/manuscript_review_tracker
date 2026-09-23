@@ -51,6 +51,23 @@ A promotion run:
 8. Verifies that the deployed site's public routes respond and records tag, commit and
    tree to the job summary.
 
+**Tool integrity around the build.** `vercel build` runs application and dependency
+code as the same user before the deploy step uses the Vercel token. So: (a) right after
+the tools are installed, before the application is, `scripts/tool-digest.sh` records a
+sha256 over this checkout and the Node.js installation (excluding `.git` and
+`tools/node_modules`) as a step output, which the runner holds; (b) the build step then
+empties its `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT` and step-summary files, so
+nothing the build wrote there reaches later steps; (c) `Verify tools` fails with
+`tool-integrity` if `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH` or `NODE_OPTIONS`
+is set or the recomputed digest differs, then installs the Vercel CLI afresh from
+`tools/package-lock.json` (sha512-verified, with a fresh npm cache) into the runner's
+temp directory; (d) the deploy step uses that fresh install. Residual boundary: a
+process started by build-time code that keeps running into the Deploy step (same uid,
+same VM) can still observe that step's environment or race the checks; this cannot be
+removed without moving deploy to a separate job/VM, which would need the build output
+transferred via artifacts (excluded: public repo) — accepted residual; mitigated by a
+Vercel token scoped to the pilot team/project and short-lived.
+
 Secrets live only in the protected `naga-pilot` environment, never at repository
 level, and each is passed only to the step that
 needs it, by environment variable, never on a command line. Besides

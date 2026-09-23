@@ -180,6 +180,20 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" tools \
             npm ci --ignore-scripts --no-audit --no-fund --prefix "$GITHUB_WORKSPACE/tools"
 
+      # Recorded before any application code runs; a step output is held by the
+      # runner, out of reach of the build. Re-checked in "Verify tools".
+      - name: Record tool digest
+        id: tooldigest
+        shell: bash
+        run: |
+          NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR") || {
+            printf 'verify: FAIL tool-integrity\n'
+            exit 1
+          }
+          printf 'digest=%s\n' "$DIGEST" >> "$GITHUB_OUTPUT"
+          printf 'tools: recorded\n'
+
       - name: Install
         shell: bash
         working-directory: ${{ runner.temp }}/src
@@ -200,8 +214,41 @@ jobs:
         shell: bash
         working-directory: ${{ runner.temp }}/src
         run: |
+          STATUS=0
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
-            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" build --prod
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" build --prod || STATUS=$?
+          # Nothing the build wrote to the step files reaches later steps.
+          : > "$GITHUB_ENV"
+          : > "$GITHUB_PATH"
+          : > "$GITHUB_OUTPUT"
+          : > "$GITHUB_STEP_SUMMARY"
+          exit "$STATUS"
+
+      # The build ran application code as this user: re-check the tools, then
+      # deploy from a fresh install verified against the lockfile's sha512s.
+      - name: Verify tools
+        shell: bash
+        env:
+          RECORDED_DIGEST: ${{ steps.tooldigest.outputs.digest }}
+        run: |
+          fail() {
+            printf 'verify: FAIL tool-integrity\n'
+            exit 1
+          }
+          for v in BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH NODE_OPTIONS; do
+            [ -z "${!v:-}" ] || fail
+          done
+          NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR") || fail
+          if [ -z "$RECORDED_DIGEST" ] || [ -z "$DIGEST" ] || [ "$DIGEST" != "$RECORDED_DIGEST" ]; then
+            fail
+          fi
+          rm -rf "$RUNNER_TEMP/deploy-tools" "$RUNNER_TEMP/npm-cache-deploy"
+          mkdir "$RUNNER_TEMP/deploy-tools"
+          cp "$GITHUB_WORKSPACE/tools/package.json" "$GITHUB_WORKSPACE/tools/package-lock.json" "$RUNNER_TEMP/deploy-tools/"
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" deploy-tools \
+            npm ci --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/npm-cache-deploy" --prefix "$RUNNER_TEMP/deploy-tools"
+          printf 'tools: verified\n'
 
       - name: Deploy
         id: deploy
@@ -213,7 +260,7 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.PILOT_VERCEL_PROJECT_ID }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-deploy \
-            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" deploy --prebuilt --prod
+            "$RUNNER_TEMP/deploy-tools/node_modules/.bin/vercel" deploy --prebuilt --prod
           LOG_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.log"
           URL=$(grep -E '^https://[a-z0-9.-]+\.vercel\.app$' "$LOG_FILE" | tail -n 1) || true
           if [ -z "$URL" ] || ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
