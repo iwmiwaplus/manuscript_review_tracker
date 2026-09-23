@@ -62,9 +62,6 @@ jobs:
     environment: controller-rehearsal
     permissions:
       contents: read
-    # Job level so the Build step stays byte-identical to promote-naga-pilot.yml.
-    env:
-      VERCEL_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
