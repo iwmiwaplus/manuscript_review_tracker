@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# fetch-source.sh TAG DEST
+# fetch-source.sh ALLOWLIST TAG DEST
 #
-# Fetches exactly refs/heads/main and refs/tags/TAG from the private source
-# repository over SSH into a fresh git repository at DEST, without saving a
+# Refuses (printing verify-release.sh's lookup failure, e.g.
+# "verify: FAIL not-allowlisted") unless TAG has an entry in ALLOWLIST; this
+# runs before the deploy key is written or anything is fetched. Then fetches
+# exactly refs/heads/main and refs/tags/TAG from the private source repository
+# over SSH into a fresh git repository at DEST, without saving a
 # remote. Prints "fetch: ok" or "fetch: FAIL" and exits accordingly.
 #
 # Required env: SOURCE_DEPLOY_KEY (non-empty), SOURCE_REPOSITORY (owner/name).
@@ -16,16 +19,19 @@ fail() {
   exit 1
 }
 
-if [ "$#" -ne 2 ]; then
+if [ "$#" -ne 3 ]; then
   fail
 fi
 
-TAG=$1
-DEST=$2
+ALLOWLIST=$1
+TAG=$2
+DEST=$3
 
-TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
-if ! [[ "$TAG" =~ $TAG_RE ]]; then
-  fail
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
+if ! LOOKUP=$(bash "$SCRIPT_DIR/verify-release.sh" "$ALLOWLIST" "$TAG" 2>/dev/null); then
+  printf '%s\n' "$LOOKUP"
+  exit 1
 fi
 
 TEST_MODE=0
@@ -42,7 +48,6 @@ if [ -z "${SOURCE_REPOSITORY:-}" ] || ! [[ "$SOURCE_REPOSITORY" =~ $REPO_RE ]]; 
   fail
 fi
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 KNOWN_HOSTS="$SCRIPT_DIR/known_hosts"
 
 KEY_FILE=""
@@ -84,7 +89,7 @@ if ! git init --quiet "$DEST" >/dev/null 2>&1; then
   fail
 fi
 
-if ! GIT_SSH_COMMAND="$SSH_CMD" git -C "$DEST" fetch --quiet --no-tags "$REMOTE_URL" \
+if ! GIT_SSH_COMMAND="$SSH_CMD" git -C "$DEST" -c transfer.fsckObjects=true fetch --quiet --no-tags "$REMOTE_URL" \
   "+refs/heads/main:refs/remotes/source/main" \
   "+refs/tags/${TAG}:refs/tags/${TAG}" >/dev/null 2>&1; then
   fail

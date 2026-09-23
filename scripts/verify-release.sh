@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 #
-# verify-release.sh ALLOWLIST TAG SOURCE_DIR
+# verify-release.sh ALLOWLIST TAG [SOURCE_DIR]
 #
-# Verifies that TAG in SOURCE_DIR (a git repository already fetched by
+# With two arguments: allowlist lookup only (no git, no network). Checks TAG's
+# shape and that ALLOWLIST holds a well-formed entry for it; prints exactly
+# "allowlist: ok" and exits 0, or fails as below. fetch-source.sh and the
+# un-gated preflight job run this before any credential is used.
+#
+# With three arguments: verifies that TAG in SOURCE_DIR (a git repository already fetched by
 # fetch-source.sh) matches the entry recorded for it in ALLOWLIST, and that
 # it is an annotated tag on a commit reachable from refs/remotes/source/main.
 #
@@ -15,13 +20,13 @@ fail() {
   exit 1
 }
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -ne 2 ] && [ "$#" -ne 3 ]; then
   fail invalid-tag
 fi
 
 ALLOWLIST=$1
 TAG=$2
-SOURCE_DIR=$3
+SOURCE_DIR=${3:-}
 
 TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
 if ! [[ "$TAG" =~ $TAG_RE ]]; then
@@ -50,6 +55,11 @@ ALLOW_TREE=$(jq -r --arg tag "$TAG" '.releases[$tag].tree // empty' "$ALLOWLIST"
 HEX_RE='^[0-9a-f]{40}$'
 if ! [[ "$ALLOW_TAG_OBJECT" =~ $HEX_RE ]] || ! [[ "$ALLOW_COMMIT" =~ $HEX_RE ]] || ! [[ "$ALLOW_TREE" =~ $HEX_RE ]]; then
   fail allowlist-invalid
+fi
+
+if [ "$#" -eq 2 ]; then
+  printf 'allowlist: ok\n'
+  exit 0
 fi
 
 if ! git -C "$SOURCE_DIR" show-ref --verify --quiet "refs/tags/$TAG" 2>/dev/null; then

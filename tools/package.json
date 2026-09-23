@@ -1,0 +1,7 @@
+{
+  "name": "controller-tools",
+  "private": true,
+  "dependencies": {
+    "vercel": "59.5.0"
+  }
+}

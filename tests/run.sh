@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Self-contained test suite for scripts/verify-release.sh, scripts/fetch-source.sh
-# and scripts/quiet.sh. Builds fixture repositories under mktemp -d, runs every
+# Self-contained test suite for scripts/verify-release.sh, scripts/fetch-source.sh,
+# scripts/check-run.sh and scripts/quiet.sh. Builds fixture repositories under mktemp -d, runs every
 # required case, prints PASS/FAIL per case, and exits non-zero if any case fails.
 
 set -u
@@ -9,6 +9,7 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 VERIFY="$ROOT/scripts/verify-release.sh"
+CHECK_RUN="$ROOT/scripts/check-run.sh"
 FETCH="$ROOT/scripts/fetch-source.sh"
 QUIET="$ROOT/scripts/quiet.sh"
 ALLOWLIST_REAL="$ROOT/releases/naga-pilot.json"
@@ -46,11 +47,17 @@ make_allowlist() {
     >"$out"
 }
 
+# Fixture fetches go through fetch-source.sh's allowlist gate with an entry
+# that only has to exist and be well-formed; verify-release.sh then checks the
+# case's own allowlist.
 fetch_src() {
   tag=$1
   url=$2
   dest=$(mktemp -d "$WORK/src.XXXXXX")
-  out=$(FETCH_URL_OVERRIDE="$url" "$FETCH" "$tag" "$dest" 2>&1)
+  gate="$dest.allow.json"
+  z=0000000000000000000000000000000000000000
+  make_allowlist "$gate" "$tag" "$z" "$z" "$z"
+  out=$(FETCH_URL_OVERRIDE="$url" "$FETCH" "$gate" "$tag" "$dest" 2>&1)
   status=$?
   if [ "$status" -ne 0 ]; then
     printf 'SETUP FAILURE: fetch %s from %s failed: %s\n' "$tag" "$url" "$out" >&2
@@ -60,7 +67,7 @@ fetch_src() {
 }
 
 run_verify() {
-  VERIFY_STDOUT=$("$VERIFY" "$1" "$2" "$3" 2>"$WORK/stderr.tmp")
+  VERIFY_STDOUT=$("$VERIFY" "$@" 2>"$WORK/stderr.tmp")
   VERIFY_EXIT=$?
   VERIFY_STDERR=$(cat "$WORK/stderr.tmp")
 }
@@ -308,7 +315,7 @@ mkdir -p "$RUNNER_TEMP18"
 DEST18="$WORK/dest18"
 F18_OUT=$(CONTROLLER_TEST_MODE=1 FETCH_URL_OVERRIDE="$UPSTREAM" SOURCE_REPOSITORY="acme/example" \
   SOURCE_DEPLOY_KEY="dummy-test-key-$$" RUNNER_TEMP="$RUNNER_TEMP18" \
-  "$FETCH" "v9.9.9-rc.1" "$DEST18" 2>"$WORK/f18err.tmp")
+  "$FETCH" "$A1" "v9.9.9-rc.1" "$DEST18" 2>"$WORK/f18err.tmp")
 F18_EXIT=$?
 REMOTE_CFG=$(git -C "$DEST18" config --get-regexp '^remote\.' 2>/dev/null)
 LEFTOVER_KEYS=$(find "$RUNNER_TEMP18" -type f 2>/dev/null)
@@ -317,6 +324,68 @@ if [ "$F18_EXIT" -eq 0 ] && [ "$F18_OUT" = "fetch: ok" ] && [ -z "$REMOTE_CFG" ]
 else
   bad "case18-fetch-no-remote-no-key" "exit=$F18_EXIT out=[$F18_OUT] remote=[$REMOTE_CFG] leftover=[$LEFTOVER_KEYS]"
 fi
+
+## --- Case 20: lookup-only mode ----------------------------------------------------
+
+run_verify "$A1" "v9.9.9-rc.1"
+check_case "case20-lookup-ok" "allowlist: ok" 0
+run_verify "$A1" "v9.9.8"
+check_case "case20-lookup-not-allowlisted" "verify: FAIL not-allowlisted" 1
+
+## --- Case 21: fetch refuses before any key or fetch --------------------------------
+# v9.9.8 is a real tag upstream but absent from A1; main and a raw SHA are not tags.
+
+for req in v9.9.8 main "$V999_COMMIT"; do
+  case "$req" in
+    v9.9.8) want="verify: FAIL not-allowlisted" ;;
+    *) want="verify: FAIL invalid-tag" ;;
+  esac
+  RT21=$(mktemp -d "$WORK/rt21.XXXXXX")
+  DEST21="$RT21/dest"
+  F21_OUT=$(CONTROLLER_TEST_MODE=1 FETCH_URL_OVERRIDE="$UPSTREAM" SOURCE_REPOSITORY="acme/example" \
+    SOURCE_DEPLOY_KEY="dummy-test-key-$$" RUNNER_TEMP="$RT21" \
+    "$FETCH" "$A1" "$req" "$DEST21" 2>"$WORK/f21err.tmp")
+  F21_EXIT=$?
+  F21_ERR=$(cat "$WORK/f21err.tmp")
+  LEFTOVER21=$(find "$RT21" -mindepth 1 2>/dev/null)
+  if [ "$F21_EXIT" -eq 1 ] && [ "$F21_OUT" = "$want" ] && [ -z "$F21_ERR" ] && [ -z "$LEFTOVER21" ]; then
+    ok "case21-fetch-refused-$req"
+  else
+    bad "case21-fetch-refused-$req" "exit=$F21_EXIT out=[$F21_OUT] err=[$F21_ERR] leftover=[$LEFTOVER21]"
+  fi
+done
+
+## --- Case 22: check-run.sh (actor and stale-run guard) --------------------------
+# CTRL stands in for this controller repository; its main moved from OLD to NEW.
+
+CTRL="$WORK/controller"
+git -c init.defaultBranch=main init --quiet "$CTRL"
+git_fx "$CTRL" commit --quiet --allow-empty -m "controller 1"
+CTRL_OLD=$(git -C "$CTRL" rev-parse HEAD)
+git_fx "$CTRL" commit --quiet --allow-empty -m "controller 2"
+CTRL_NEW=$(git -C "$CTRL" rev-parse HEAD)
+
+# check_run NAME EXPECTED PROMOTER ACTOR TRIGGERING_ACTOR ATTEMPT SHA
+check_run() {
+  CR_OUT=$(MAIN_URL_OVERRIDE="$CTRL" GITHUB_REPOSITORY="acme/controller" \
+    RELEASE_PROMOTER="$3" GITHUB_ACTOR="$4" GITHUB_TRIGGERING_ACTOR="$5" \
+    GITHUB_RUN_ATTEMPT="$6" GITHUB_SHA="$7" "$CHECK_RUN" 2>"$WORK/crerr.tmp")
+  CR_EXIT=$?
+  CR_ERR=$(cat "$WORK/crerr.tmp")
+  if [ "$2" = "run: ok" ]; then want_exit=0; else want_exit=1; fi
+  if [ "$CR_OUT" = "$2" ] && [ "$CR_EXIT" -eq "$want_exit" ] && [ -z "$CR_ERR" ]; then
+    ok "$1"
+  else
+    bad "$1" "out=[$CR_OUT] exit=$CR_EXIT err=[$CR_ERR] expected=[$2]"
+  fi
+}
+
+check_run case22-run-ok "run: ok" alice alice alice 1 "$CTRL_NEW"
+check_run case22-wrong-actor "verify: FAIL actor-not-promoter" alice mallory alice 1 "$CTRL_NEW"
+check_run case22-wrong-triggering-actor "verify: FAIL actor-not-promoter" alice alice mallory 1 "$CTRL_NEW"
+check_run case22-empty-promoter "verify: FAIL actor-not-promoter" "" "" "" 1 "$CTRL_NEW"
+check_run case22-attempt-2 "verify: FAIL stale-run" alice alice alice 2 "$CTRL_NEW"
+check_run case22-main-moved "verify: FAIL stale-run" alice alice alice 1 "$CTRL_OLD"
 
 ## --- Case 19: real allowlist validates ----------------------------------------------
 
