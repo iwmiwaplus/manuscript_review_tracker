@@ -44,6 +44,13 @@ most one pending run per concurrency group, so dispatching either workflow while
 another run in that group is already queued replaces the older pending run rather
 than queueing behind it. Check the Actions run queue before dispatching.
 
+## Operations note
+
+Reviewers approve only runs whose head commit is the current `main` of this repository.
+Re-running an older run does not pick up later fixes: GitHub re-executes that run's
+older workflow file and allowlist as they existed at that commit, not the versions on
+`main` today. Dispatch a fresh run instead of re-running an old one.
+
 ## Adding a release
 
 A release is added to the allowlist by opening a pull request that adds exactly one

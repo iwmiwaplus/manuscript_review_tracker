@@ -75,9 +75,9 @@ else
 fi
 
 if [ -n "$KEY_FILE" ]; then
-  SSH_CMD="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
+  SSH_CMD="ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -i \"$KEY_FILE\" -o UserKnownHostsFile=\"$KNOWN_HOSTS\""
 else
-  SSH_CMD="ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
+  SSH_CMD="ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=\"$KNOWN_HOSTS\""
 fi
 
 if ! git init --quiet "$DEST" >/dev/null 2>&1; then

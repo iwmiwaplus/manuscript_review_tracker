@@ -32,7 +32,7 @@ bad() {
 git_fx() {
   repo=$1
   shift
-  git -C "$repo" -c user.name="Fixture" -c user.email="fixture@controller.invalid" "$@"
+  git -C "$repo" -c user.name="Fixture" -c user.email=fixture "$@"
 }
 
 make_allowlist() {
@@ -125,7 +125,7 @@ export RUNNER_TEMP="$RUNNER_TEMP_DIR"
 
 A1="$WORK/allow1.json"
 make_allowlist "$A1" "v9.9.9-rc.1" "$V999_TAG_OBJ" "$V999_COMMIT" "$V999_TREE"
-S1=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S1=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A1" "v9.9.9-rc.1" "$S1"
 check_case "case1-correct-entry" "verify: ok" 0
 
@@ -145,13 +145,13 @@ fi
 
 A2="$WORK/allow2.json"
 make_allowlist "$A2" "v9.9.8" "$V998_OBJ" "$V998_OBJ" "$V998_OBJ"
-S2=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S2=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A2" "v9.9.9-rc.1" "$S2"
 check_case "case2-not-allowlisted" "verify: FAIL not-allowlisted" 1
 
 ## --- Cases 3-5: invalid tag shapes -------------------------------------------
 
-S3=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S3=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 
 run_verify "$A1" "main" "$S3"
 check_case "case3-invalid-tag-main" "verify: FAIL invalid-tag" 1
@@ -166,7 +166,7 @@ check_case "case5-invalid-tag-injection" "verify: FAIL invalid-tag" 1
 
 A6="$WORK/allow6.json"
 make_allowlist "$A6" "v9.9.8" "$V998_OBJ" "$V998_OBJ" "$V998_OBJ"
-S6=$(fetch_src "v9.9.8" "$UPSTREAM")
+S6=$(fetch_src "v9.9.8" "$UPSTREAM") || exit 1
 run_verify "$A6" "v9.9.8" "$S6"
 check_case "case6-not-annotated" "verify: FAIL not-annotated" 1
 
@@ -175,7 +175,7 @@ check_case "case6-not-annotated" "verify: FAIL not-annotated" 1
 A7="$WORK/allow7.json"
 BAD_OBJ="0000000000000000000000000000000000000000"
 make_allowlist "$A7" "v9.9.9-rc.1" "$BAD_OBJ" "$V999_COMMIT" "$V999_TREE"
-S7=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S7=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A7" "v9.9.9-rc.1" "$S7"
 check_case "case7-tag-object-mismatch" "verify: FAIL tag-object-mismatch" 1
 
@@ -188,7 +188,7 @@ git_fx "$UPSTREAM8" tag -a v9.9.9-rc.1 -m "recreated release 9.9.9-rc.1" main >/
 
 A8="$WORK/allow8.json"
 make_allowlist "$A8" "v9.9.9-rc.1" "$V999_TAG_OBJ" "$V999_COMMIT" "$V999_TREE"
-S8=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM8")
+S8=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM8") || exit 1
 run_verify "$A8" "v9.9.9-rc.1" "$S8"
 check_case "case8-tag-recreated-mismatch" "verify: FAIL tag-object-mismatch" 1
 
@@ -197,7 +197,7 @@ check_case "case8-tag-recreated-mismatch" "verify: FAIL tag-object-mismatch" 1
 A9="$WORK/allow9.json"
 WRONG_COMMIT="1111111111111111111111111111111111111111"
 make_allowlist "$A9" "v9.9.9-rc.1" "$V999_TAG_OBJ" "$WRONG_COMMIT" "$V999_TREE"
-S9=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S9=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A9" "v9.9.9-rc.1" "$S9"
 check_case "case9-commit-mismatch" "verify: FAIL commit-mismatch" 1
 
@@ -206,7 +206,7 @@ check_case "case9-commit-mismatch" "verify: FAIL commit-mismatch" 1
 A10="$WORK/allow10.json"
 WRONG_TREE="2222222222222222222222222222222222222222"
 make_allowlist "$A10" "v9.9.9-rc.1" "$V999_TAG_OBJ" "$V999_COMMIT" "$WRONG_TREE"
-S10=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S10=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A10" "v9.9.9-rc.1" "$S10"
 check_case "case10-tree-mismatch" "verify: FAIL tree-mismatch" 1
 
@@ -214,7 +214,7 @@ check_case "case10-tree-mismatch" "verify: FAIL tree-mismatch" 1
 
 A11="$WORK/allow11.json"
 make_allowlist "$A11" "v9.9.7" "$V997_TAG_OBJ" "$V997_COMMIT" "$V997_TREE"
-S11=$(fetch_src "v9.9.7" "$UPSTREAM")
+S11=$(fetch_src "v9.9.7" "$UPSTREAM") || exit 1
 run_verify "$A11" "v9.9.7" "$S11"
 check_case "case11-not-on-main" "verify: FAIL not-on-main" 1
 
@@ -222,7 +222,7 @@ check_case "case11-not-on-main" "verify: FAIL not-on-main" 1
 
 A12="$WORK/allow12.json"
 make_allowlist "$A12" "v9.9.6" "$V996_TAG_OBJ" "$V999_COMMIT" "$V999_TREE"
-S12=$(fetch_src "v9.9.6" "$UPSTREAM")
+S12=$(fetch_src "v9.9.6" "$UPSTREAM") || exit 1
 run_verify "$A12" "v9.9.6" "$S12"
 check_case "case12-tag-target-not-commit" "verify: FAIL tag-target-not-commit" 1
 
@@ -232,7 +232,7 @@ A13="$WORK/allow13.json"
 jq -n --arg tag "v9.9.9-rc.1" --arg tagobj "$V999_TAG_OBJ" --arg tree "$V999_TREE" \
   '{source_repository: "acme/example", releases: {($tag): {tag_object: $tagobj, commit: "not-a-sha", tree: $tree}}}' \
   >"$A13"
-S13=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S13=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A13" "v9.9.9-rc.1" "$S13"
 check_case "case13-allowlist-invalid-nonhex" "verify: FAIL allowlist-invalid" 1
 
@@ -240,9 +240,25 @@ check_case "case13-allowlist-invalid-nonhex" "verify: FAIL allowlist-invalid" 1
 
 A14="$WORK/allow14.json"
 printf 'not json at all {' >"$A14"
-S14=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM")
+S14=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
 run_verify "$A14" "v9.9.9-rc.1" "$S14"
 check_case "case14-allowlist-invalid-notjson" "verify: FAIL allowlist-invalid" 1
+
+## --- Case 14b: allowlist file empty -----------------------------------------------
+
+A14B="$WORK/allow14b.json"
+printf '' >"$A14B"
+S14B=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
+run_verify "$A14B" "v9.9.9-rc.1" "$S14B"
+check_case "case14b-allowlist-invalid-empty" "verify: FAIL allowlist-invalid" 1
+
+## --- Case 14c: .releases is not an object -----------------------------------------
+
+A14C="$WORK/allow14c.json"
+jq -n '{source_repository: "acme/example", releases: "nope"}' >"$A14C"
+S14C=$(fetch_src "v9.9.9-rc.1" "$UPSTREAM") || exit 1
+run_verify "$A14C" "v9.9.9-rc.1" "$S14C"
+check_case "case14c-allowlist-invalid-releases-not-object" "verify: FAIL allowlist-invalid" 1
 
 ## --- Case 15: quiet.sh success ---------------------------------------------------
 
@@ -290,16 +306,16 @@ fi
 RUNNER_TEMP18="$WORK/runner-temp-18"
 mkdir -p "$RUNNER_TEMP18"
 DEST18="$WORK/dest18"
-CONTROLLER_TEST_MODE=1 FETCH_URL_OVERRIDE="$UPSTREAM" SOURCE_REPOSITORY="acme/example" \
+F18_OUT=$(CONTROLLER_TEST_MODE=1 FETCH_URL_OVERRIDE="$UPSTREAM" SOURCE_REPOSITORY="acme/example" \
   SOURCE_DEPLOY_KEY="dummy-test-key-$$" RUNNER_TEMP="$RUNNER_TEMP18" \
-  "$FETCH" "v9.9.9-rc.1" "$DEST18" >/dev/null 2>"$WORK/f18err.tmp"
+  "$FETCH" "v9.9.9-rc.1" "$DEST18" 2>"$WORK/f18err.tmp")
 F18_EXIT=$?
 REMOTE_CFG=$(git -C "$DEST18" config --get-regexp '^remote\.' 2>/dev/null)
 LEFTOVER_KEYS=$(find "$RUNNER_TEMP18" -type f 2>/dev/null)
-if [ "$F18_EXIT" -eq 0 ] && [ -z "$REMOTE_CFG" ] && [ -z "$LEFTOVER_KEYS" ]; then
+if [ "$F18_EXIT" -eq 0 ] && [ "$F18_OUT" = "fetch: ok" ] && [ -z "$REMOTE_CFG" ] && [ -z "$LEFTOVER_KEYS" ]; then
   ok "case18-fetch-no-remote-no-key"
 else
-  bad "case18-fetch-no-remote-no-key" "exit=$F18_EXIT remote=[$REMOTE_CFG] leftover=[$LEFTOVER_KEYS]"
+  bad "case18-fetch-no-remote-no-key" "exit=$F18_EXIT out=[$F18_OUT] remote=[$REMOTE_CFG] leftover=[$LEFTOVER_KEYS]"
 fi
 
 ## --- Case 19: real allowlist validates ----------------------------------------------

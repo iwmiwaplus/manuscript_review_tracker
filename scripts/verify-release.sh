@@ -32,6 +32,10 @@ if ! jq empty "$ALLOWLIST" >/dev/null 2>&1; then
   fail allowlist-invalid
 fi
 
+if ! jq -e '.releases | type == "object"' "$ALLOWLIST" >/dev/null 2>&1; then
+  fail allowlist-invalid
+fi
+
 HAS_ENTRY=$(jq -r --arg tag "$TAG" \
   'if (.releases[$tag] // null) == null then "no" else "yes" end' \
   "$ALLOWLIST" 2>/dev/null)
