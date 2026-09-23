@@ -15,41 +15,60 @@ never tool or migration output.
 Promotion is manual: it runs only on `workflow_dispatch`, never on a push, pull
 request, or schedule. The single input is a `release_tag`, e.g. `v1.2.0-rc.1`.
 
+Each run is titled `Promote Naga pilot <tag> by @<actor>` (`run-name`), so the tag
+and the person who dispatched it are visible in the run list and on the approval
+screen.
+
 A promotion run:
 
-1. Confirms the person who triggered the run is the configured release promoter.
-2. Fetches the requested tag from the source repository over SSH, using a read-only
-   deploy key held as an **environment** secret (`naga-pilot`, or `controller-dry-run`
-   for the dry-run workflow) — no promotion secret is ever stored at the repository
-   level, only inside the protected environments that gate these workflows.
-3. Verifies the tag against `releases/naga-pilot.json`: the tag must be an allowlisted
-   entry, and its tag object, commit, and tree must match the recorded values exactly.
-   Only tags listed in that file, pinned this way, can ever be promoted — an
-   unlisted tag, or a listed tag whose commit or tree has since changed, is refused.
-4. Confirms the deployment configuration (database and hosting credentials) is
-   present.
-5. Installs dependencies, links and migrates the database, deploys the notification
-   worker, and builds and deploys the application.
-6. Verifies that the deployed site's public routes respond, and records the tag,
-   commit, tree, and deployment URL to the run's job summary.
+1. **Preflight (before approval, no secrets).** An un-gated `preflight` job with
+   read-only permissions runs `scripts/check-run.sh` and the allowlist lookup, then
+   writes the tag, commit and tree it is about to promote to the job summary for the
+   reviewer. It stops a run unless:
+   - the dispatcher is the configured release promoter (`RELEASE_PROMOTER`, both
+     actor and triggering actor);
+   - it is a fresh dispatch (`GITHUB_RUN_ATTEMPT` is 1) and its head commit is the
+     current `main` of this repository, read anonymously — a re-run would replay an
+     older workflow file and allowlist, so it is refused (`stale-run`);
+   - the tag is well-formed and listed in `releases/naga-pilot.json`.
+   A branch name, raw SHA or unlisted tag never reaches approval.
+2. **Gated job.** After approval the `promote` job repeats `check-run.sh` itself (a
+   "re-run failed jobs" reuses preflight's old result) and never reads preflight's
+   outputs.
+3. Fetches the tag from the source repository over SSH with a read-only deploy key.
+   `scripts/fetch-source.sh` repeats the allowlist lookup before writing the key.
+4. Verifies the tag against `releases/naga-pilot.json`: tag object, commit and tree
+   must match the recorded values exactly, and the commit must be on source `main`.
+5. Confirms the six environment secrets are present.
+6. **Database before any application code.** Installs the Supabase CLI release binary
+   (version-pinned and checked against a recorded sha256), links, previews and applies
+   migrations, deploys the notification worker, then deletes the link state. The
+   application's dependencies are not installed yet, so no application code can run
+   while a Supabase credential is in use.
+7. Installs the Vercel CLI from this repository's own lockfile (`tools/`), installs the
+   application with `npm ci --ignore-scripts`, pulls the Vercel configuration, builds
+   (no token in the build step) and deploys.
+8. Verifies that the deployed site's public routes respond and records tag, commit and
+   tree to the job summary.
 
-The `promote` job runs under the protected `naga-pilot` GitHub Environment, which
-requires a review before the job is allowed to run. `.github/workflows/dry-run.yml`
-is a temporary companion workflow used to rehearse the pipeline (checkout, fetch,
-verify, install, build) against a disposable environment before promotion is
-enabled for real; it is removed once that rehearsal is complete.
+Secrets live only in the protected environments (`naga-pilot`, or `controller-dry-run`
+for the dry run), never at repository level, and each is passed only to the step that
+needs it, by environment variable, never on a command line. Besides
+`SOURCE_DEPLOY_KEY`, `naga-pilot` holds six deployment secrets:
+`PILOT_SUPABASE_ACCESS_TOKEN`, `PILOT_SUPABASE_DB_PASSWORD`, `PILOT_SUPABASE_PROJECT_REF`,
+`PILOT_VERCEL_TOKEN`, `PILOT_VERCEL_ORG_ID`, `PILOT_VERCEL_PROJECT_ID` (the Vercel IDs
+are secrets so they are masked in the public log). The `promote` job requires a review before it runs.
+
+`.github/workflows/dry-run.yml` is a temporary companion that rehearses the same trust
+path (preflight, check-run, fetch, verify, pinned Supabase CLI, tools lockfile,
+`npm ci --ignore-scripts`, build) without any deployment credential; it is removed
+once that rehearsal is complete.
 
 Both workflows share the concurrency group `promote-naga-pilot`. GitHub keeps at
 most one pending run per concurrency group, so dispatching either workflow while
 another run in that group is already queued replaces the older pending run rather
-than queueing behind it. Check the Actions run queue before dispatching.
-
-## Operations note
-
-Reviewers approve only runs whose head commit is the current `main` of this repository.
-Re-running an older run does not pick up later fixes: GitHub re-executes that run's
-older workflow file and allowlist as they existed at that commit, not the versions on
-`main` today. Dispatch a fresh run instead of re-running an old one.
+than queueing behind it. Check the Actions run queue before dispatching. To retry a
+failed run, dispatch a new one from `main`; re-runs are refused.
 
 ## Adding a release
 
@@ -64,5 +83,5 @@ merge; only entries present on `main` can ever be promoted.
 bash tests/run.sh
 ```
 
-This exercises the verification and fetch scripts against local fixtures; it does
+This exercises the verification, fetch, run-check and log scripts against local fixtures; it does
 not touch GitHub or any live infrastructure.

@@ -1,4 +1,5 @@
 name: Promote Naga pilot
+run-name: 'Promote Naga pilot ${{ inputs.release_tag }} by @${{ github.actor }}'
 
 on:
   workflow_dispatch:
@@ -15,28 +16,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check run
+        shell: bash
+        env:
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: bash scripts/check-run.sh
+
+      - name: Check allowlist
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: bash scripts/verify-release.sh releases/naga-pilot.json "$RELEASE_TAG"
+
+      - name: Show release for approval
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
+          TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
+          {
+            printf 'tag: %s\n' "$RELEASE_TAG"
+            printf 'commit: %s\n' "$COMMIT"
+            printf 'tree: %s\n' "$TREE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   promote:
+    needs: preflight
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: naga-pilot
     permissions:
       contents: read
     steps:
-      - name: Validate request
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
-        run: |
-          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_TRIGGERING_ACTOR" ]; then
-            printf 'verify: FAIL actor-not-promoter\n'
-            exit 1
-          fi
-
       - name: Checkout controller
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Repeated here: "Re-run failed jobs" reuses preflight's earlier result.
+      - name: Check run
+        shell: bash
+        env:
+          RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
+        run: bash scripts/check-run.sh
 
       - name: Fetch source
         shell: bash
@@ -45,7 +79,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           SOURCE_REPOSITORY="$(jq -r .source_repository releases/naga-pilot.json)" \
-            bash scripts/fetch-source.sh "$RELEASE_TAG" "$RUNNER_TEMP/src"
+            bash scripts/fetch-source.sh releases/naga-pilot.json "$RELEASE_TAG" "$RUNNER_TEMP/src"
 
       - name: Verify release
         shell: bash
@@ -60,8 +94,8 @@ jobs:
           PILOT_SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
           PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
           PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
-          PILOT_VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
-          PILOT_VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
+          PILOT_VERCEL_ORG_ID: ${{ secrets.PILOT_VERCEL_ORG_ID }}
+          PILOT_VERCEL_PROJECT_ID: ${{ secrets.PILOT_VERCEL_PROJECT_ID }}
         run: |
           if [ -z "$PILOT_SUPABASE_ACCESS_TOKEN" ] || [ -z "$PILOT_SUPABASE_DB_PASSWORD" ] || \
              [ -z "$PILOT_SUPABASE_PROJECT_REF" ] || [ -z "$PILOT_VERCEL_TOKEN" ] || \
@@ -70,45 +104,35 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Install
+      # No application code runs until every Supabase step is done: the CLI is
+      # a sha256-pinned release binary, and the app is not installed yet.
+      # The tarball's `supabase` is a shim that execs the `supabase-go` beside it.
+      - name: Install Supabase CLI
         shell: bash
-        working-directory: ${{ runner.temp }}/src
-        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci
-
-      - name: Pull Vercel configuration
-        shell: bash
-        working-directory: ${{ runner.temp }}/src
         env:
-          VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
-          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+          SUPABASE_CLI_URL: https://github.com/supabase/cli/releases/download/v2.113.0/supabase_2.113.0_linux_amd64.tar.gz
+          SUPABASE_CLI_SHA256: 14659e7148ad17b77e69e5c36b27be572110519c76c796da1b53c07c3590f593
         run: |
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-pull \
-            npx --yes vercel@59.5.0 pull --yes --environment=production --token="$PILOT_VERCEL_TOKEN"
-
-      - name: Build
-        shell: bash
-        working-directory: ${{ runner.temp }}/src
-        run: |
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
-            npx --yes vercel@59.5.0 build --prod
+          # shellcheck disable=SC2016 # expanded by the inner bash from the step env
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" supabase-cli bash -euc '
+            curl --fail --silent --show-error --location --proto "=https" --retry 3 \
+              --output "$RUNNER_TEMP/supabase-cli.tar.gz" "$SUPABASE_CLI_URL"
+            printf "%s  %s\n" "$SUPABASE_CLI_SHA256" "$RUNNER_TEMP/supabase-cli.tar.gz" | sha256sum --check --strict
+            mkdir -p "$RUNNER_TEMP/bin"
+            tar -xzf "$RUNNER_TEMP/supabase-cli.tar.gz" -C "$RUNNER_TEMP/bin" supabase supabase-go
+            test -x "$RUNNER_TEMP/bin/supabase"
+          '
 
       - name: Link database
         shell: bash
         working-directory: ${{ runner.temp }}/src
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.PILOT_SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
           PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
-          PILOT_SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-link \
-            npx supabase link --project-ref "$PILOT_SUPABASE_PROJECT_REF" --password "$PILOT_SUPABASE_DB_PASSWORD"
+            "$RUNNER_TEMP/bin/supabase" link --project-ref "$PILOT_SUPABASE_PROJECT_REF"
 
       - name: Preview migrations
         shell: bash
@@ -118,7 +142,7 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-preview \
-            npx supabase db push --linked --include-all --dry-run
+            "$RUNNER_TEMP/bin/supabase" db push --linked --include-all --dry-run
 
       - name: Apply migrations
         shell: bash
@@ -128,7 +152,7 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.PILOT_SUPABASE_DB_PASSWORD }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" db-push \
-            npx supabase db push --linked --include-all --yes
+            "$RUNNER_TEMP/bin/supabase" db push --linked --include-all --yes
 
       - name: Deploy notification worker
         shell: bash
@@ -138,17 +162,58 @@ jobs:
           PILOT_SUPABASE_PROJECT_REF: ${{ secrets.PILOT_SUPABASE_PROJECT_REF }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" edge-deploy \
-            npx supabase functions deploy deliver-notifications --project-ref "$PILOT_SUPABASE_PROJECT_REF" --use-api
+            "$RUNNER_TEMP/bin/supabase" functions deploy deliver-notifications --project-ref "$PILOT_SUPABASE_PROJECT_REF" --use-api
+
+      - name: Remove database link
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/src/supabase/.temp"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install tools
+        shell: bash
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" tools \
+            npm ci --ignore-scripts --no-audit --no-fund --prefix "$GITHUB_WORKSPACE/tools"
+
+      - name: Install
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci --ignore-scripts
+
+      - name: Pull Vercel configuration
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.PILOT_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PILOT_VERCEL_PROJECT_ID }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-pull \
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" pull --yes --environment=production
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" build --prod
 
       - name: Deploy
         id: deploy
         shell: bash
         working-directory: ${{ runner.temp }}/src
         env:
-          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+          VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.PILOT_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PILOT_VERCEL_PROJECT_ID }}
         run: |
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-deploy \
-            npx --yes vercel@59.5.0 deploy --prebuilt --prod --token="$PILOT_VERCEL_TOKEN"
+            "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" deploy --prebuilt --prod
           LOG_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.log"
           URL=$(grep -E '^https://[a-z0-9.-]+\.vercel\.app$' "$LOG_FILE" | tail -n 1) || true
           if [ -z "$URL" ] || ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
@@ -176,7 +241,6 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-          DEPLOY_URL: ${{ steps.deploy.outputs.url }}
         run: |
           COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
           TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
@@ -184,5 +248,4 @@ jobs:
             printf 'tag: %s\n' "$RELEASE_TAG"
             printf 'commit: %s\n' "$COMMIT"
             printf 'tree: %s\n' "$TREE"
-            printf 'url: %s\n' "$DEPLOY_URL"
           } >> "$GITHUB_STEP_SUMMARY"
