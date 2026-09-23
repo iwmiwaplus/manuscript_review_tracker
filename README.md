@@ -19,7 +19,9 @@ A promotion run:
 
 1. Confirms the person who triggered the run is the configured release promoter.
 2. Fetches the requested tag from the source repository over SSH, using a read-only
-   deploy key held as a repository secret.
+   deploy key held as an **environment** secret (`naga-pilot`, or `controller-dry-run`
+   for the dry-run workflow) — no promotion secret is ever stored at the repository
+   level, only inside the protected environments that gate these workflows.
 3. Verifies the tag against `releases/naga-pilot.json`: the tag must be an allowlisted
    entry, and its tag object, commit, and tree must match the recorded values exactly.
    Only tags listed in that file, pinned this way, can ever be promoted — an
@@ -36,6 +38,11 @@ requires a review before the job is allowed to run. `.github/workflows/dry-run.y
 is a temporary companion workflow used to rehearse the pipeline (checkout, fetch,
 verify, install, build) against a disposable environment before promotion is
 enabled for real; it is removed once that rehearsal is complete.
+
+Both workflows share the concurrency group `promote-naga-pilot`. GitHub keeps at
+most one pending run per concurrency group, so dispatching either workflow while
+another run in that group is already queued replaces the older pending run rather
+than queueing behind it. Check the Actions run queue before dispatching.
 
 ## Adding a release
 

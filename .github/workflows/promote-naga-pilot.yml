@@ -28,8 +28,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
         run: |
-          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ]; then
-            printf 'actor-not-promoter\n'
+          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_TRIGGERING_ACTOR" ]; then
+            printf 'verify: FAIL actor-not-promoter\n'
             exit 1
           fi
 
@@ -80,6 +80,26 @@ jobs:
         working-directory: ${{ runner.temp }}/src
         run: bash "$GITHUB_WORKSPACE/scripts/quiet.sh" install npm ci
 
+      - name: Pull Vercel configuration
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-pull \
+            npx --yes vercel@59.5.0 pull --yes --environment=production --token="$PILOT_VERCEL_TOKEN"
+
+      - name: Build
+        shell: bash
+        working-directory: ${{ runner.temp }}/src
+        env:
+          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
+            npx --yes vercel@59.5.0 build --prod --token="$PILOT_VERCEL_TOKEN"
+
       - name: Link database
         shell: bash
         working-directory: ${{ runner.temp }}/src
@@ -119,26 +139,6 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" edge-deploy \
             npx supabase functions deploy deliver-notifications --project-ref "$PILOT_SUPABASE_PROJECT_REF" --use-api
 
-      - name: Pull Vercel configuration
-        shell: bash
-        working-directory: ${{ runner.temp }}/src
-        env:
-          VERCEL_ORG_ID: ${{ vars.PILOT_VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ vars.PILOT_VERCEL_PROJECT_ID }}
-          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
-        run: |
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-pull \
-            npx --yes vercel@59.5.0 pull --yes --environment=production --token="$PILOT_VERCEL_TOKEN"
-
-      - name: Build
-        shell: bash
-        working-directory: ${{ runner.temp }}/src
-        env:
-          PILOT_VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
-        run: |
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-build \
-            npx --yes vercel@59.5.0 build --prod --token="$PILOT_VERCEL_TOKEN"
-
       - name: Deploy
         id: deploy
         shell: bash
@@ -149,8 +149,8 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-deploy \
             npx --yes vercel@59.5.0 deploy --prebuilt --prod --token="$PILOT_VERCEL_TOKEN"
           LOG_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.log"
-          URL=$(tail -n 1 "$LOG_FILE")
-          if ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
+          URL=$(grep -E '^https://[a-z0-9.-]+\.vercel\.app$' "$LOG_FILE" | tail -n 1) || true
+          if [ -z "$URL" ] || ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
             printf 'stage vercel-deploy-url: FAIL (exit 1)\n'
             exit 1
           fi
@@ -162,7 +162,8 @@ jobs:
           DEPLOY_URL: ${{ steps.deploy.outputs.url }}
         run: |
           for path in /login /register; do
-            CODE=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$DEPLOY_URL$path")
+            CODE=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 "$DEPLOY_URL$path" || true)
+            CODE=${CODE:-000}
             if [ "$CODE" != "200" ]; then
               printf 'routes: FAIL %s %s\n' "$path" "$CODE"
               exit 1

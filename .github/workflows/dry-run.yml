@@ -28,8 +28,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_PROMOTER: ${{ vars.RELEASE_PROMOTER }}
         run: |
-          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ]; then
-            printf 'actor-not-promoter\n'
+          if [ -z "$RELEASE_PROMOTER" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_ACTOR" ] || [ "$RELEASE_PROMOTER" != "$GITHUB_TRIGGERING_ACTOR" ]; then
+            printf 'verify: FAIL actor-not-promoter\n'
             exit 1
           fi
 
