@@ -105,8 +105,9 @@ jobs:
           fi
 
       # Tools come first so nothing tool-related can fail after migrations. The
-      # install is npm ci --ignore-scripts of this repository's own lockfile: no
-      # package code runs and no secret is in these steps' env.
+      # installs are npm ci --ignore-scripts of this repository's own lockfile: no
+      # application or install-script code runs and no secret is in these steps' env.
+      # deploy-tools is the copy Deploy uses; it is not executed before Deploy.
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -122,6 +123,13 @@ jobs:
             --prefix "$GITHUB_WORKSPACE/tools"
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-version \
             "$GITHUB_WORKSPACE/tools/node_modules/.bin/vercel" --version
+          rm -rf "$RUNNER_TEMP/deploy-tools" "$RUNNER_TEMP/npm-cache-deploy"
+          mkdir "$RUNNER_TEMP/deploy-tools"
+          : > "$RUNNER_TEMP/npmrc-empty-deploy"
+          cp "$GITHUB_WORKSPACE/tools/package.json" "$GITHUB_WORKSPACE/tools/package-lock.json" "$RUNNER_TEMP/deploy-tools/"
+          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" deploy-tools \
+            npm ci --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/npm-cache-deploy" \
+            --userconfig "$RUNNER_TEMP/npmrc-empty-deploy" --prefix "$RUNNER_TEMP/deploy-tools"
 
       # Recorded before any application code runs; a step output is held by the
       # runner, out of reach of the build. Re-checked in "Verify tools".
@@ -132,7 +140,7 @@ jobs:
           SCRIPT=$(sha256sum < "$GITHUB_WORKSPACE/scripts/tool-digest.sh") || SCRIPT=
           SCRIPT=${SCRIPT%% *}
           NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
-          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR") || {
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR" "$RUNNER_TEMP/deploy-tools") || {
             printf 'verify: FAIL tool-integrity\n'
             exit 1
           }
@@ -240,8 +248,8 @@ jobs:
           : > "$GITHUB_STEP_SUMMARY"
           exit "$STATUS"
 
-      # The build ran application code as this user: re-check the tools, then
-      # deploy from a fresh install verified against the lockfile's sha512s.
+      # The build ran application code as this user: re-check the tools (local
+      # only, no network) before Deploy uses the pre-installed deploy-tools copy.
       - name: Verify tools
         shell: bash
         env:
@@ -262,17 +270,12 @@ jobs:
             fail
           fi
           NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
-          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR") || fail
+          DIGEST=$(bash "$GITHUB_WORKSPACE/scripts/tool-digest.sh" "$GITHUB_WORKSPACE" "$NODE_DIR" "$RUNNER_TEMP/deploy-tools") || fail
           if [ -z "$RECORDED_DIGEST" ] || [ -z "$DIGEST" ] || [ "$DIGEST" != "$RECORDED_DIGEST" ]; then
             fail
           fi
-          rm -rf "$RUNNER_TEMP/deploy-tools" "$RUNNER_TEMP/npm-cache-deploy" "$RUNNER_TEMP/vercel-global"
-          mkdir "$RUNNER_TEMP/deploy-tools" "$RUNNER_TEMP/vercel-global"
-          : > "$RUNNER_TEMP/deploy-tools/npmrc-empty"
-          cp "$GITHUB_WORKSPACE/tools/package.json" "$GITHUB_WORKSPACE/tools/package-lock.json" "$RUNNER_TEMP/deploy-tools/"
-          bash "$GITHUB_WORKSPACE/scripts/quiet.sh" deploy-tools \
-            npm ci --ignore-scripts --no-audit --no-fund --cache "$RUNNER_TEMP/npm-cache-deploy" \
-            --userconfig "$RUNNER_TEMP/deploy-tools/npmrc-empty" --prefix "$RUNNER_TEMP/deploy-tools"
+          rm -rf "$RUNNER_TEMP/vercel-global"
+          mkdir "$RUNNER_TEMP/vercel-global"
           printf 'tools: verified\n'
 
       - name: Deploy

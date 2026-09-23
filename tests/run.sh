@@ -440,6 +440,8 @@ printf 'head\n' >"$T24/.git/HEAD"
 printf 'v1\n' >"$T24/tools/node_modules/vercel/index.js"
 ln -s bin/tool "$T24/link"
 printf 'n\n' >"$WORK/other24/node"
+mkdir -p "$WORK/other24/node_modules/vercel"
+printf 'd1\n' >"$WORK/other24/node_modules/vercel/index.js"
 
 digest24() {
   D24_OUT=$("$DIGEST" "$@" 2>"$WORK/d24err.tmp")
@@ -486,6 +488,12 @@ ln -s bin/tool "$T24/link"
 printf 'n2\n' >"$WORK/other24/node"
 expect_digest case24-digest-second-dir differs "$BASE24"
 printf 'n\n' >"$WORK/other24/node"
+
+# Only tools/node_modules is skipped: node_modules of another digested dir
+# (deploy-tools on the runner) is covered.
+printf 'd2\n' >"$WORK/other24/node_modules/vercel/index.js"
+expect_digest case24-digest-covers-other-node-modules differs "$BASE24"
+printf 'd1\n' >"$WORK/other24/node_modules/vercel/index.js"
 
 for args in missing none; do
   if [ "$args" = missing ]; then digest24 "$T24" "$WORK/no-such-dir"; else digest24; fi

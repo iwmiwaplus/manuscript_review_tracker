@@ -42,9 +42,12 @@ A promotion run:
 5. Confirms the six environment secrets are present.
 6. **Tools before the database.** Sets up Node.js, installs the Vercel CLI from this
    repository's own lockfile (`tools/`, `npm ci --ignore-scripts` with an empty user
-   npm config), checks `vercel --version`, and records the tool digest (below). No
-   package code runs and no secret is in these steps, so nothing tool-related can fail
-   after the database has been migrated.
+   npm config), checks `vercel --version`, installs a second copy for the deploy step
+   into the runner's temp directory (`deploy-tools`, fresh npm cache, not run before
+   Deploy), and records the tool digest (below). No application or install-script code
+   runs and no secret is in these steps. After the database is migrated no tool is
+   downloaded again; the remaining network steps are the application install, the
+   Vercel configuration pull, the deploy and the route checks.
 7. **Database before any application code.** Installs the Supabase CLI release binary
    (version-pinned and checked against a recorded sha256), links, previews and applies
    migrations, deploys the notification worker, then deletes the link state. The
@@ -57,17 +60,18 @@ A promotion run:
 
 **Tool integrity around the build.** `vercel build` runs application and dependency
 code as the same user before the deploy step uses the Vercel token. So: (a) right after
-the tools are installed, before the application is, `scripts/tool-digest.sh` records a
-sha256 of the digest script itself and a sha256 over this checkout and the Node.js installation (excluding `.git` and
-`tools/node_modules`) as a step output, which the runner holds; (b) the build step then
+the tools are installed, before the application is, the system `sha256sum` hashes
+`scripts/tool-digest.sh`, and that script hashes this checkout, the Node.js installation
+and the `deploy-tools` copy (excluding `.git` and `tools/node_modules`); both values are
+kept as step outputs, which the runner holds; (b) the build step then
 empties its `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT` and step-summary files, so
 nothing the build wrote there reaches later steps; (c) `Verify tools` fails with
 `tool-integrity` if `BASH_ENV`, `ENV`, `LD_PRELOAD`, `LD_LIBRARY_PATH` or `NODE_OPTIONS`
 is set, or if the digest script's sha256 (checked with the system `sha256sum` before the
-script runs) or the recomputed digest differs, then installs the Vercel CLI afresh from
-`tools/package-lock.json` (sha512-verified, with a fresh npm cache and an empty user npm
-config) into the runner's temp directory; (d) the deploy step uses that fresh install
-with a fresh, empty Vercel global config directory (the token still comes from
+script runs) or the recomputed digest differs — all local, no network; (d) the deploy
+step uses the `deploy-tools` copy (installed before the database steps from
+`tools/package-lock.json`, sha512-verified, fresh npm cache, empty user npm config) with
+a fresh, empty Vercel global config directory (the token still comes from
 `VERCEL_TOKEN`). Residual boundary: a
 process started by build-time code that keeps running into the Deploy step (same uid,
 same VM) can still observe that step's environment or race the checks; this cannot be
