@@ -387,6 +387,49 @@ check_run case22-empty-promoter "verify: FAIL actor-not-promoter" "" "" "" 1 "$C
 check_run case22-attempt-2 "verify: FAIL stale-run" alice alice alice 2 "$CTRL_NEW"
 check_run case22-main-moved "verify: FAIL stale-run" alice alice alice 1 "$CTRL_OLD"
 
+## --- Case 23: tools lockfile (vercel pin, patched tar, registry + integrity) -----
+
+# check_tools_lock LOCK PKG: prints nothing and returns 0 when the lockfile's vercel
+# equals the pinned version, every tar is >= 7.5.21, and every resolved entry comes
+# from the npm registry with a sha512 integrity; otherwise prints the first problem.
+check_tools_lock() {
+  pinned=$(jq -r '.dependencies.vercel' "$2") || return 1
+  jq -r --arg pinned "$pinned" '
+    .packages as $p
+    | if ($p["node_modules/vercel"].version // "") != $pinned then "vercel-version"
+      elif ([$p | to_entries[] | select(.key | test("(^|/)node_modules/tar$"))
+              | .value.version | split("-")[0] | split(".") | map(tonumber)
+              | select(. < [7, 5, 21])] | length) > 0 then "tar-version"
+      elif ([$p | to_entries[] | select(.value.resolved)
+              | select((.value.resolved | startswith("https://registry.npmjs.org/") | not)
+                       or ((.value.integrity // "") | startswith("sha512-") | not))]
+            | length) > 0 then "resolved-or-integrity"
+      else empty end' "$1"
+}
+
+TOOLS_LOCK="$ROOT/tools/package-lock.json"
+TOOLS_PKG="$ROOT/tools/package.json"
+if L23=$(check_tools_lock "$TOOLS_LOCK" "$TOOLS_PKG" 2>&1) && [ -z "$L23" ]; then
+  ok "case23-tools-lockfile"
+else
+  bad "case23-tools-lockfile" "problem=[$L23]"
+fi
+
+# The check bites: an old tar, a moved vercel, or a foreign URL each fail it.
+jq '(.packages | to_entries[] | select(.key | test("(^|/)node_modules/tar$")) | .key) as $k
+    | .packages[$k].version = "7.5.7"' "$TOOLS_LOCK" >"$WORK/lock23-tar.json"
+jq '.packages["node_modules/vercel"].version = "59.5.0"' "$TOOLS_LOCK" >"$WORK/lock23-vercel.json"
+jq '.packages["node_modules/vercel"].resolved = "https://example.invalid/vercel.tgz"' \
+  "$TOOLS_LOCK" >"$WORK/lock23-url.json"
+for m in tar:tar-version vercel:vercel-version url:resolved-or-integrity; do
+  L23=$(check_tools_lock "$WORK/lock23-${m%%:*}.json" "$TOOLS_PKG" 2>&1)
+  if [ "$L23" = "${m#*:}" ]; then
+    ok "case23-tools-lockfile-rejects-${m%%:*}"
+  else
+    bad "case23-tools-lockfile-rejects-${m%%:*}" "problem=[$L23] expected=[${m#*:}]"
+  fi
+done
+
 ## --- Case 19: real allowlist validates ----------------------------------------------
 
 RTAGOBJ=$(jq -r '.releases["v1.2.0-rc.1"].tag_object // empty' "$ALLOWLIST_REAL")
