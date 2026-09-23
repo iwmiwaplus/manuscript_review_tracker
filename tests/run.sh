@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Self-contained test suite for scripts/verify-release.sh, scripts/fetch-source.sh,
-# scripts/check-run.sh and scripts/quiet.sh. Builds fixture repositories under mktemp -d, runs every
+# scripts/check-run.sh, scripts/quiet.sh, scripts/tool-digest.sh and the tools lockfile. Builds fixture repositories under mktemp -d, runs every
 # required case, prints PASS/FAIL per case, and exits non-zero if any case fails.
 
 set -u
@@ -386,6 +386,123 @@ check_run case22-wrong-triggering-actor "verify: FAIL actor-not-promoter" alice 
 check_run case22-empty-promoter "verify: FAIL actor-not-promoter" "" "" "" 1 "$CTRL_NEW"
 check_run case22-attempt-2 "verify: FAIL stale-run" alice alice alice 2 "$CTRL_NEW"
 check_run case22-main-moved "verify: FAIL stale-run" alice alice alice 1 "$CTRL_OLD"
+
+## --- Case 23: tools lockfile (vercel pin, patched tar, registry + integrity) -----
+
+# check_tools_lock LOCK PKG: prints nothing and returns 0 when the lockfile's vercel
+# equals the pinned version, every tar is >= 7.5.21, and every resolved entry comes
+# from the npm registry with a sha512 integrity; otherwise prints the first problem.
+check_tools_lock() {
+  pinned=$(jq -r '.dependencies.vercel' "$2") || return 1
+  jq -r --arg pinned "$pinned" '
+    .packages as $p
+    | if ($p["node_modules/vercel"].version // "") != $pinned then "vercel-version"
+      elif ([$p | to_entries[] | select(.key | test("(^|/)node_modules/tar$"))
+              | .value.version | split("-")[0] | split(".") | map(tonumber)
+              | select(. < [7, 5, 21])] | length) > 0 then "tar-version"
+      elif ([$p | to_entries[] | select(.value.resolved)
+              | select((.value.resolved | startswith("https://registry.npmjs.org/") | not)
+                       or ((.value.integrity // "") | startswith("sha512-") | not))]
+            | length) > 0 then "resolved-or-integrity"
+      else empty end' "$1"
+}
+
+TOOLS_LOCK="$ROOT/tools/package-lock.json"
+TOOLS_PKG="$ROOT/tools/package.json"
+if L23=$(check_tools_lock "$TOOLS_LOCK" "$TOOLS_PKG" 2>&1) && [ -z "$L23" ]; then
+  ok "case23-tools-lockfile"
+else
+  bad "case23-tools-lockfile" "problem=[$L23]"
+fi
+
+# The check bites: an old tar, a moved vercel, or a foreign URL each fail it.
+jq '(.packages | to_entries[] | select(.key | test("(^|/)node_modules/tar$")) | .key) as $k
+    | .packages[$k].version = "7.5.7"' "$TOOLS_LOCK" >"$WORK/lock23-tar.json"
+jq '.packages["node_modules/vercel"].version = "59.5.0"' "$TOOLS_LOCK" >"$WORK/lock23-vercel.json"
+jq '.packages["node_modules/vercel"].resolved = "https://example.invalid/vercel.tgz"' \
+  "$TOOLS_LOCK" >"$WORK/lock23-url.json"
+for m in tar:tar-version vercel:vercel-version url:resolved-or-integrity; do
+  L23=$(check_tools_lock "$WORK/lock23-${m%%:*}.json" "$TOOLS_PKG" 2>&1)
+  if [ "$L23" = "${m#*:}" ]; then
+    ok "case23-tools-lockfile-rejects-${m%%:*}"
+  else
+    bad "case23-tools-lockfile-rejects-${m%%:*}" "problem=[$L23] expected=[${m#*:}]"
+  fi
+done
+
+## --- Case 24: tool-digest.sh ------------------------------------------------------
+
+DIGEST="$ROOT/scripts/tool-digest.sh"
+T24="$WORK/tree24"
+mkdir -p "$T24/bin" "$T24/.git" "$T24/tools/node_modules/vercel" "$WORK/other24"
+printf 'tool\n' >"$T24/bin/tool"
+printf 'head\n' >"$T24/.git/HEAD"
+printf 'v1\n' >"$T24/tools/node_modules/vercel/index.js"
+ln -s bin/tool "$T24/link"
+printf 'n\n' >"$WORK/other24/node"
+mkdir -p "$WORK/other24/node_modules/vercel"
+printf 'd1\n' >"$WORK/other24/node_modules/vercel/index.js"
+
+digest24() {
+  D24_OUT=$("$DIGEST" "$@" 2>"$WORK/d24err.tmp")
+  D24_EXIT=$?
+  D24_ERR=$(cat "$WORK/d24err.tmp")
+}
+
+# expect_digest NAME same|differs BASELINE
+expect_digest() {
+  digest24 "$T24" "$WORK/other24"
+  if [ "$D24_EXIT" -ne 0 ] || [ -n "$D24_ERR" ] || ! [[ "$D24_OUT" =~ ^[0-9a-f]{64}$ ]]; then
+    bad "$1" "out=[$D24_OUT] exit=$D24_EXIT err=[$D24_ERR]"
+  elif { [ "$2" = same ] && [ "$D24_OUT" = "$3" ]; } || { [ "$2" = differs ] && [ "$D24_OUT" != "$3" ]; }; then
+    ok "$1"
+  else
+    bad "$1" "digest=[$D24_OUT] baseline=[$3] expected=$2"
+  fi
+}
+
+digest24 "$T24" "$WORK/other24"
+BASE24=$D24_OUT
+expect_digest case24-digest-stable same "$BASE24"
+
+printf 'head2\n' >"$T24/.git/HEAD"
+expect_digest case24-digest-ignores-git same "$BASE24"
+printf 'v2\n' >"$T24/tools/node_modules/vercel/index.js"
+expect_digest case24-digest-ignores-tools-node-modules same "$BASE24"
+
+printf 'tampered\n' >"$T24/bin/tool"
+expect_digest case24-digest-content-change differs "$BASE24"
+printf 'tool\n' >"$T24/bin/tool"
+expect_digest case24-digest-restored same "$BASE24"
+
+printf 'new\n' >"$T24/bin/extra"
+expect_digest case24-digest-new-file differs "$BASE24"
+rm "$T24/bin/extra"
+
+rm "$T24/link"
+ln -s bin/extra "$T24/link"
+expect_digest case24-digest-symlink-retarget differs "$BASE24"
+rm "$T24/link"
+ln -s bin/tool "$T24/link"
+
+printf 'n2\n' >"$WORK/other24/node"
+expect_digest case24-digest-second-dir differs "$BASE24"
+printf 'n\n' >"$WORK/other24/node"
+
+# Only tools/node_modules is skipped: node_modules of another digested dir
+# (deploy-tools on the runner) is covered.
+printf 'd2\n' >"$WORK/other24/node_modules/vercel/index.js"
+expect_digest case24-digest-covers-other-node-modules differs "$BASE24"
+printf 'd1\n' >"$WORK/other24/node_modules/vercel/index.js"
+
+for args in missing none; do
+  if [ "$args" = missing ]; then digest24 "$T24" "$WORK/no-such-dir"; else digest24; fi
+  if [ "$D24_OUT" = "verify: FAIL tool-integrity" ] && [ "$D24_EXIT" -eq 1 ] && [ -z "$D24_ERR" ]; then
+    ok "case24-digest-fail-$args"
+  else
+    bad "case24-digest-fail-$args" "out=[$D24_OUT] exit=$D24_EXIT err=[$D24_ERR]"
+  fi
+done
 
 ## --- Case 19: real allowlist validates ----------------------------------------------
 

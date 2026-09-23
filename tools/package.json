@@ -2,6 +2,9 @@
   "name": "controller-tools",
   "private": true,
   "dependencies": {
-    "vercel": "59.5.0"
+    "vercel": "59.25.4"
+  },
+  "overrides": {
+    "tar": "7.5.22"
   }
 }
