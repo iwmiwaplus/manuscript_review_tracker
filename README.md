@@ -54,9 +54,12 @@ A promotion run:
    application's dependencies are not installed yet, so no application code can run
    while a Supabase credential is in use.
 8. Installs the application with `npm ci --ignore-scripts`, pulls the Vercel
-   configuration, builds (no token in the build step), re-checks the tools and deploys.
-9. Verifies that the deployed site's public routes respond and records tag, commit and
-   tree to the job summary.
+   configuration, builds (no token in the build step), re-checks the tools and deploys
+   with `--format json`. `scripts/deploy-identity.sh` reads that JSON (the CLI's stdout
+   alone) and fails closed unless it is exactly one production, `READY` deployment with a
+   `dpl_` id and an `https://*.vercel.app` URL; the log shows only `deploy: identified`.
+9. Verifies that the deployed site's public routes respond and records tag, commit,
+   tree and deployment id to the job summary.
 
 **Tool integrity around the build.** `vercel build` runs application and dependency
 code as the same user before the deploy step uses the Vercel token. So: (a) right after

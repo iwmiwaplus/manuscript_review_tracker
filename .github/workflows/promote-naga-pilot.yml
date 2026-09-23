@@ -286,17 +286,22 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.PILOT_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PILOT_VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.PILOT_VERCEL_PROJECT_ID }}
+        # --format json: stdout alone is one JSON object, kept apart from the stage
+        # log (stderr). The human-format URL on stdout has no trailing newline, so
+        # a merged stdout+stderr log glues it to the next progress line.
         run: |
+          JSON_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.json"
+          # shellcheck disable=SC2016 # expanded by the inner bash
           bash "$GITHUB_WORKSPACE/scripts/quiet.sh" vercel-deploy \
-            "$RUNNER_TEMP/deploy-tools/node_modules/.bin/vercel" deploy --prebuilt --prod \
+            bash -c 'umask 077; out=$1; shift; "$@" > "$out"' _ "$JSON_FILE" \
+            "$RUNNER_TEMP/deploy-tools/node_modules/.bin/vercel" deploy --prebuilt --prod --format json \
             --global-config "$RUNNER_TEMP/vercel-global"
-          LOG_FILE="$RUNNER_TEMP/controller-logs/vercel-deploy.log"
-          URL=$(grep -E '^https://[a-z0-9.-]+\.vercel\.app$' "$LOG_FILE" | tail -n 1) || true
-          if [ -z "$URL" ] || ! [[ "$URL" =~ ^https://[a-z0-9.-]+\.vercel\.app$ ]]; then
-            printf 'stage vercel-deploy-url: FAIL (exit 1)\n'
+          if ! IDENTITY=$(bash "$GITHUB_WORKSPACE/scripts/deploy-identity.sh" "$JSON_FILE"); then
+            printf '%s\n' "$IDENTITY"
             exit 1
           fi
-          printf 'url=%s\n' "$URL" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$IDENTITY" >> "$GITHUB_OUTPUT"
+          printf 'deploy: identified\n'
 
       - name: Verify public routes
         shell: bash
@@ -317,6 +322,7 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          DEPLOYMENT_ID: ${{ steps.deploy.outputs.deployment_id }}
         run: |
           COMMIT=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].commit' releases/naga-pilot.json)
           TREE=$(jq -r --arg tag "$RELEASE_TAG" '.releases[$tag].tree' releases/naga-pilot.json)
@@ -324,4 +330,5 @@ jobs:
             printf 'tag: %s\n' "$RELEASE_TAG"
             printf 'commit: %s\n' "$COMMIT"
             printf 'tree: %s\n' "$TREE"
+            printf 'deployment: %s\n' "$DEPLOYMENT_ID"
           } >> "$GITHUB_STEP_SUMMARY"
