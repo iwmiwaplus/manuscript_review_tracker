@@ -1,0 +1,15 @@
+name: Probe PR secret access
+on: pull_request
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    environment: controller-dry-run
+    steps:
+      - name: Attempt to read protected secrets
+        shell: bash
+        env:
+          K: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          C: ${{ secrets.DRY_RUN_CANARY }}
+        run: |
+          if [ -n "$K$C" ]; then echo "probe: SECRETS AVAILABLE"; else echo "probe: secrets absent"; fi
