@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Self-contained test suite for scripts/verify-release.sh, scripts/fetch-source.sh,
-# scripts/check-run.sh, scripts/quiet.sh, scripts/tool-digest.sh and the tools lockfile. Builds fixture repositories under mktemp -d, runs every
+# scripts/check-run.sh, scripts/quiet.sh, scripts/tool-digest.sh, scripts/deploy-identity.sh,
+# the Deploy/Verify public routes/Record promotion step bodies and the tools lockfile. Builds fixture repositories under mktemp -d, runs every
 # required case, prints PASS/FAIL per case, and exits non-zero if any case fails.
 
 set -u
@@ -501,6 +502,304 @@ for args in missing none; do
     ok "case24-digest-fail-$args"
   else
     bad "case24-digest-fail-$args" "out=[$D24_OUT] exit=$D24_EXIT err=[$D24_ERR]"
+  fi
+done
+
+## --- Case 25: deploy-identity.sh ------------------------------------------------------
+# Fixture provenance: the pinned vercel 59.25.4, run with the Deploy step's flags
+# (`deploy --prebuilt --prod [--format json]`, non-TTY, no agent env) against a local
+# stand-in for its API (--api http://127.0.0.1:PORT; nothing left the machine).
+# With --format json its stdout is exactly one pretty-printed object from
+# getDeploymentOutputJson(): id, url ("https://" + host), inspectorUrl, readyState,
+# target, deploymentApiUrl. Without it, stdout is the bare URL with NO trailing newline
+# (processDeployment: process.stdout.write(`https://${url}`)) and the non-TTY progress
+# lines go to stderr, so a merged log reads "https://<host>.vercel.appQueued…".
+# Identifiers below are synthetic.
+
+IDENT="$ROOT/scripts/deploy-identity.sh"
+FX_ID="dpl_Fx0000000000000000000000Example"
+FX_HOST="example-project-abc123xyz-example-team.vercel.app"
+IDENT_OK="deployment_id=$FX_ID
+url=https://$FX_HOST"
+IDENT_FAIL="stage vercel-deploy-identity: FAIL (exit 1)"
+
+# fx_json FILE [JQ-UPDATE]: the real 59.25.4 --format json shape, optionally altered.
+fx_json() {
+  jq -n --arg id "$FX_ID" --arg host "$FX_HOST" '{
+      id: $id,
+      url: ("https://" + $host),
+      inspectorUrl: "https://vercel.com/example-team/example-project/FxInspect",
+      readyState: "READY",
+      target: "production",
+      deploymentApiUrl: ("https://api.vercel.com/v13/deployments/" + $id)
+    } | '"${2:-.}" >"$1"
+}
+
+# ident_case NAME EXPECTED_STDOUT EXPECTED_EXIT [SCRIPT] FILE...
+run_ident() {
+  script=$1
+  shift
+  ID_OUT=$("$script" "$@" 2>"$WORK/iderr.tmp")
+  ID_EXIT=$?
+  ID_ERR=$(cat "$WORK/iderr.tmp")
+}
+ident_case() {
+  name=$1 want=$2 want_exit=$3
+  shift 3
+  run_ident "$IDENT" "$@"
+  if [ "$ID_OUT" = "$want" ] && [ "$ID_EXIT" -eq "$want_exit" ] && [ -z "$ID_ERR" ]; then
+    ok "$name"
+  else
+    bad "$name" "out=[$ID_OUT] exit=$ID_EXIT err=[$ID_ERR]"
+  fi
+}
+
+F25="$WORK/ident"
+mkdir -p "$F25"
+
+fx_json "$F25/valid.json"
+ident_case case25-valid "$IDENT_OK" 0 "$F25/valid.json"
+
+# Extra fields the CLI adds when present (buildMachine, warning) do not matter.
+fx_json "$F25/extra.json" '. + {buildMachine: {cores: 4}, warning: "w"}'
+ident_case case25-valid-extra-fields "$IDENT_OK" 0 "$F25/extra.json"
+
+# The human-format output that broke the first promotion: merged stdout+stderr.
+{
+  printf 'Vercel CLI 59.25.4 (Node.js 24.0.0)\n'
+  printf 'Retrieving project\342\200\246\n'
+  printf 'Deploying example-team/example-project\n'
+  printf '  Inspect         https://vercel.com/example-team/example-project/FxInspect\n'
+  printf '  Production      https://%s\n' "$FX_HOST"
+  printf 'https://%sQueued\342\200\246\n' "$FX_HOST"
+  printf 'Building\342\200\246\n'
+  printf '\033[2K\033[1A\033[2K\033[G  Production      https://%s\n' "$FX_HOST"
+  printf 'Completing\342\200\246\n'
+  printf '\342\226\262 Aliased         https://example.invalid\n\n'
+  printf '\342\234\223 Ready in 41s\n'
+} >"$F25/merged-human.log"
+# Root cause reproduced: the old anchored grep finds nothing in that shape...
+if ! grep -qE '^https://[a-z0-9.-]+\.vercel\.app$' "$F25/merged-human.log"; then
+  ok "case25-old-grep-misses-merged-human-log"
+else
+  bad "case25-old-grep-misses-merged-human-log" "old grep matched"
+fi
+# ...and the new parser refuses it, and the human stdout alone (no newline), outright.
+ident_case case25-merged-human-log "$IDENT_FAIL" 1 "$F25/merged-human.log"
+printf 'https://%s' "$FX_HOST" >"$F25/human-stdout.txt"
+ident_case case25-human-stdout "$IDENT_FAIL" 1 "$F25/human-stdout.txt"
+
+# Informational text around the JSON on stdout is refused, not skipped.
+{ printf 'Deploying\n'; cat "$F25/valid.json"; } >"$F25/text-before.json"
+ident_case case25-text-before-json "$IDENT_FAIL" 1 "$F25/text-before.json"
+{ cat "$F25/valid.json"; printf 'Done\n'; } >"$F25/text-after.json"
+ident_case case25-text-after-json "$IDENT_FAIL" 1 "$F25/text-after.json"
+
+ident_case case25-missing-file "$IDENT_FAIL" 1 "$F25/no-such.json"
+ident_case case25-no-args "$IDENT_FAIL" 1
+: >"$F25/empty.json"
+ident_case case25-empty "$IDENT_FAIL" 1 "$F25/empty.json"
+printf '{"id": "dpl_x",' >"$F25/invalid.json"
+ident_case case25-invalid-json "$IDENT_FAIL" 1 "$F25/invalid.json"
+fx_json "$F25/two.json"
+fx_json "$F25/two-b.json" '.id = "dpl_Other" | .url = "https://other-example.vercel.app"'
+cat "$F25/two-b.json" >>"$F25/two.json"
+ident_case case25-multiple-objects "$IDENT_FAIL" 1 "$F25/two.json"
+jq -s . "$F25/valid.json" >"$F25/array.json"
+ident_case case25-array "$IDENT_FAIL" 1 "$F25/array.json"
+# The agent/non-interactive payload wraps the object; not what the Deploy step asks for.
+jq '{status: "ok", deployment: .}' "$F25/valid.json" >"$F25/wrapped.json"
+ident_case case25-agent-wrapped "$IDENT_FAIL" 1 "$F25/wrapped.json"
+
+# fail_json NAME JQ-UPDATE: the valid shape with one alteration must fail closed.
+fail_json() {
+  fx_json "$F25/$1.json" "$2"
+  ident_case "case25-$1" "$IDENT_FAIL" 1 "$F25/$1.json"
+}
+fail_json missing-id 'del(.id)'
+fail_json null-id '.id = null'
+fail_json numeric-id '.id = 42'
+fail_json id-no-prefix '.id = "Fx0000Example"'
+fail_json id-bad-char '.id = "dpl_Fx00-00"'
+fail_json id-trailing-newline '.id = "dpl_Fx0000\n"'
+fail_json id-embedded-newline '.id = "dpl_Fx0000\nurl=https://evil.vercel.app"'
+fail_json missing-url 'del(.url)'
+fail_json url-not-vercel '.url = "https://example.com"'
+fail_json url-vercel-suffix-trick '.url = "https://x.vercel.app.example.com"'
+fail_json url-with-path '.url = "https://'"$FX_HOST"'/login"'
+fail_json url-with-port '.url = "https://'"$FX_HOST"':8443"'
+fail_json url-http '.url = "http://'"$FX_HOST"'"'
+fail_json url-uppercase '.url = "https://Example-Project.vercel.app"'
+fail_json url-prefixed '.url = "x https://'"$FX_HOST"'"'
+fail_json url-bare-vercel-app '.url = "https://vercel.app"'
+fail_json url-trailing-newline '.url = "https://'"$FX_HOST"'\n"'
+fail_json target-preview '.target = "preview"'
+fail_json target-null '.target = null'
+fail_json target-missing 'del(.target)'
+fail_json not-ready-building '.readyState = "BUILDING"'
+fail_json not-ready-error '.readyState = "ERROR"'
+fail_json not-ready-canceled '.readyState = "CANCELED"'
+fail_json not-ready-missing 'del(.readyState)'
+
+# Mutation proofs: weaken one check in a copy of the script; the named case must
+# then be accepted (so that case is what guards the check).
+# mutate NAME CASE-FIXTURE OLD NEW  (NEW empty and OLD a whole line: line removed)
+mutate() {
+  m="$WORK/ident-mut-$1.sh"
+  if [ -z "$4" ]; then
+    grep -vF -- "$3" "$IDENT" >"$m"
+  else
+    # awk via ENVIRON: a literal, first-match replacement on each line (awk -v and
+    # ${var//} would both reinterpret the backslashes).
+    MUT_OLD=$3 MUT_NEW=$4 awk '{
+      i = index($0, ENVIRON["MUT_OLD"])
+      if (i) $0 = substr($0, 1, i - 1) ENVIRON["MUT_NEW"] substr($0, i + length(ENVIRON["MUT_OLD"]))
+      print
+    }' "$IDENT" >"$m"
+  fi
+  chmod +x "$m"
+  if cmp -s "$m" "$IDENT"; then
+    bad "case25-mutation-$1" "mutation did not change the script"
+    return
+  fi
+  run_ident "$m" "$F25/$2.json"
+  if [ "$ID_EXIT" -eq 0 ] && [ "$ID_OUT" != "$IDENT_FAIL" ]; then
+    ok "case25-mutation-$1-caught-by-$2"
+  else
+    bad "case25-mutation-$1" "mutated script still rejects $2: out=[$ID_OUT] exit=$ID_EXIT"
+  fi
+}
+mutate no-ready-check not-ready-building 'and .readyState == "READY"' ''
+mutate no-target-check target-preview 'and .target == "production"' ''
+mutate host-end-unanchored url-with-path 'vercel\\.app\\z' 'vercel\\.app'
+mutate host-start-unanchored url-prefixed '\\Ahttps://' 'https://'
+mutate host-any-chars url-uppercase '[a-z0-9-]+(\\.[a-z0-9-]+)*' '[^/:]+'
+mutate id-end-unanchored id-bad-char '[A-Za-z0-9]+\\z' '[A-Za-z0-9]+'
+
+## --- Case 26: Deploy -> Verify public routes -> Record, end to end with stubs ---------
+# The three steps' run: bodies are taken from the workflow itself and run the way the
+# runner runs `shell: bash` (bash --noprofile --norc -eo pipefail).
+
+WORKFLOW="$ROOT/.github/workflows/promote-naga-pilot.yml"
+
+# step_body STEP-NAME: prints that promote-job step's run: body.
+step_body() {
+  ruby -ryaml -e '
+    step = YAML.load_file(ARGV[0])["jobs"]["promote"]["steps"].find { |s| s["name"] == ARGV[1] }
+    abort "no step" unless step && step["run"]
+    print step["run"]' "$WORKFLOW" "$1"
+}
+
+E26="$WORK/e2e"
+mkdir -p "$E26/bodies" "$E26/bin"
+for s in Deploy:deploy "Verify public routes:routes" "Record promotion:record"; do
+  if ! step_body "${s%%:*}" >"$E26/bodies/${s#*:}.sh"; then
+    bad "case26-extract-${s#*:}" "could not extract run body"
+  fi
+done
+
+# The fake vercel: records its argv, writes the CLI's non-TTY progress to stderr and,
+# per STUB_MODE, the --format json object (json), the human-format bare URL with no
+# newline (human), or nothing and exit 1 (fail).
+cat >"$E26/vercel-stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$STUB_ARGS"
+printf 'Retrieving project\342\200\246\nDeploying example-team/example-project\n' >&2
+printf '  Production      https://%s\nQueued\342\200\246\nCompleting\342\200\246\n' "$STUB_HOST" >&2
+case "$STUB_MODE" in
+  json) cat "$STUB_JSON" ;;
+  human) printf 'https://%s' "$STUB_HOST" ;;
+  *) printf 'Error: deployment failed\n' >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$E26/vercel-stub"
+
+# The fake curl: records the URL, answers 200 as --write-out '%{http_code}' would.
+cat >"$E26/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do last=$a; done
+printf '%s\n' "$last" >>"$CURL_LOG"
+printf '200'
+STUB
+chmod +x "$E26/bin/curl"
+
+# run_deploy MODE: runs the Deploy body in a fresh runner temp; sets RT, D_OUT, D_EXIT.
+run_deploy() {
+  RT=$(mktemp -d "$WORK/rt26.XXXXXX")
+  mkdir -p "$RT/deploy-tools/node_modules/.bin" "$RT/src" "$RT/vercel-global"
+  cp "$E26/vercel-stub" "$RT/deploy-tools/node_modules/.bin/vercel"
+  : >"$RT/github_output"
+  D_OUT=$(cd "$RT/src" && env RUNNER_TEMP="$RT" GITHUB_OUTPUT="$RT/github_output" \
+    GITHUB_WORKSPACE="$ROOT" VERCEL_TOKEN=dummy VERCEL_ORG_ID=dummy VERCEL_PROJECT_ID=dummy \
+    STUB_MODE="$1" STUB_JSON="$F25/valid.json" STUB_HOST="$FX_HOST" STUB_ARGS="$RT/args" \
+    bash --noprofile --norc -eo pipefail "$E26/bodies/deploy.sh" 2>"$WORK/d26err.tmp")
+  D_EXIT=$?
+  D_ERR=$(cat "$WORK/d26err.tmp")
+}
+
+run_deploy json
+WANT_ARGS="deploy
+--prebuilt
+--prod
+--format
+json
+--global-config
+$RT/vercel-global"
+JSON26="$RT/controller-logs/vercel-deploy.json"
+MODE26=$(find "$JSON26" -perm 600 2>/dev/null)
+if [ "$D_EXIT" -eq 0 ] && [ -z "$D_ERR" ] \
+  && [ "$D_OUT" = "stage vercel-deploy: ok
+deploy: identified" ] \
+  && [ "$(cat "$RT/github_output")" = "$IDENT_OK" ] \
+  && [ "$(cat "$RT/args" 2>/dev/null)" = "$WANT_ARGS" ] \
+  && [ "$MODE26" = "$JSON26" ] && cmp -s "$JSON26" "$F25/valid.json" \
+  && grep -q 'Queued' "$RT/controller-logs/vercel-deploy.log" \
+  && ! grep -q 'Queued' "$JSON26"; then
+  ok "case26-deploy-identified"
+else
+  bad "case26-deploy-identified" "exit=$D_EXIT out=[$D_OUT] err=[$D_ERR] output=[$(cat "$RT/github_output")] mode=$MODE26 args=[$(cat "$RT/args" 2>/dev/null)]"
+fi
+
+# The produced url feeds Verify public routes (stub curl) and the id feeds Record.
+URL26=$(sed -n 's/^url=//p' "$RT/github_output")
+ID26=$(sed -n 's/^deployment_id=//p' "$RT/github_output")
+: >"$RT/curl.log"
+R_OUT=$(env PATH="$E26/bin:$PATH" CURL_LOG="$RT/curl.log" DEPLOY_URL="$URL26" \
+  bash --noprofile --norc -eo pipefail "$E26/bodies/routes.sh" 2>&1)
+R_EXIT=$?
+if [ "$R_EXIT" -eq 0 ] && [ "$R_OUT" = "routes: ok" ] \
+  && [ "$(cat "$RT/curl.log")" = "https://$FX_HOST/login
+https://$FX_HOST/register" ]; then
+  ok "case26-routes-use-identified-url"
+else
+  bad "case26-routes-use-identified-url" "exit=$R_EXIT out=[$R_OUT] curl=[$(cat "$RT/curl.log")]"
+fi
+
+: >"$RT/summary"
+REC_OUT=$(cd "$ROOT" && env GITHUB_STEP_SUMMARY="$RT/summary" RELEASE_TAG="v1.2.0-rc.1" \
+  DEPLOYMENT_ID="$ID26" bash --noprofile --norc -eo pipefail "$E26/bodies/record.sh" 2>&1)
+REC_EXIT=$?
+if [ "$REC_EXIT" -eq 0 ] && [ -z "$REC_OUT" ] \
+  && [ "$(tail -n 1 "$RT/summary")" = "deployment: $FX_ID" ] \
+  && ! grep -q 'vercel\.app' "$RT/summary"; then
+  ok "case26-record-has-deployment-not-url"
+else
+  bad "case26-record-has-deployment-not-url" "exit=$REC_EXIT out=[$REC_OUT] summary=[$(cat "$RT/summary")]"
+fi
+
+# The human-format output (what run 35884569545 got) and a failing CLI: FAIL line only,
+# and no url in GITHUB_OUTPUT, so the routes step has nothing to run against.
+for mode in human fail; do
+  case "$mode" in
+    human) want="stage vercel-deploy: ok
+stage vercel-deploy-identity: FAIL (exit 1)" ;;
+    *) want="stage vercel-deploy: FAIL (exit 1)" ;;
+  esac
+  run_deploy "$mode"
+  if [ "$D_EXIT" -ne 0 ] && [ -z "$D_ERR" ] && [ "$D_OUT" = "$want" ] && ! [ -s "$RT/github_output" ]; then
+    ok "case26-deploy-$mode-fails-closed"
+  else
+    bad "case26-deploy-$mode-fails-closed" "exit=$D_EXIT out=[$D_OUT] err=[$D_ERR] output=[$(cat "$RT/github_output")]"
   fi
 done
 
