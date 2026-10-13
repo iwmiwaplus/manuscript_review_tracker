@@ -5,6 +5,11 @@
       "tag_object": "ace5cbf6cc78542cb5ab3400c5c499a8cecb109b",
       "commit": "a7509f476347d80a280097172c2a816f20dc8a6b",
       "tree": "4082ff1ce152c224b74d5d195c5e6d58cb63d6f6"
+    },
+    "v1.2.0-rc.2": {
+      "tag_object": "20754eec547e9664657f0cdfcddb77ec2b4af709",
+      "commit": "ef0739085703115d6ee87cb6ea2b3ec874f8dafb",
+      "tree": "c55f45d1d7e84a73d4b68dc57e1e45bff75fc060"
     }
   }
 }
