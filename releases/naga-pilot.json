@@ -15,6 +15,11 @@
       "tag_object": "5d7c3b349190b7398a99e1928b5169305a890d86",
       "commit": "1b0e40ed43529fcaa759966ed91902d1485692f2",
       "tree": "f233c611af112a34e887c92293e805ddebaa6441"
+    },
+    "v1.2.0-rc.4": {
+      "tag_object": "ad710fae3f9f9b21d682e1528ad6676f2e807b5c",
+      "commit": "a9bd1b1a5b1811d3d0d9e4de6c9771a32dcf5b0c",
+      "tree": "caa09f221ae77227f54a9707dedec128a0e6c37d"
     }
   }
 }
