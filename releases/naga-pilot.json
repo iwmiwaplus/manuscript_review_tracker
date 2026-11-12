@@ -20,6 +20,11 @@
       "tag_object": "ad710fae3f9f9b21d682e1528ad6676f2e807b5c",
       "commit": "a9bd1b1a5b1811d3d0d9e4de6c9771a32dcf5b0c",
       "tree": "caa09f221ae77227f54a9707dedec128a0e6c37d"
+    },
+    "v1.2.0-rc.5": {
+      "tag_object": "22eecbc6a67d0f26cd468106241b4ea839f259b1",
+      "commit": "7e35e1e7cf8f4dcf1bcc0dae6c69d7e14ea924a8",
+      "tree": "b850bb73356ec7c16bcb40328ecbf76cf235dee7"
     }
   }
 }
