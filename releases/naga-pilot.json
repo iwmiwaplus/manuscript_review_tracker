@@ -30,6 +30,11 @@
       "tag_object": "f98e6b0cd4780c0872d4dac9b1597f22c7f8b878",
       "commit": "4b77ce77450a8c2e9169a12882fdadcfb33a32cf",
       "tree": "512d524f0040d40ce4b159ee4ce628b53e7eedb2"
+    },
+    "v1.2.0-rc.8": {
+      "tag_object": "ec15794802cc93149871618a2208529d34e94837",
+      "commit": "58b21a93151dffd9ed0771ded9019cbcd507e1bf",
+      "tree": "0f384a726c158ee9229634cd96361b4940b33a1c"
     }
   }
 }
